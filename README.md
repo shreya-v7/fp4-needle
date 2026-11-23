@@ -19,7 +19,7 @@ JAX in project code; NumPy is used only for the reference quantizer and tests.
 | Stage | What | Status |
 |---|---|---|
 | 0 | Read the homework code, plan the changes | done |
-| 1 | NumPy reference quantizer (`python/needle/fp4/reference.py`) + tests | in review |
+| 1 | NumPy reference quantizer (`python/needle/fp4/reference.py`) + tests | done |
 | 2 | Fake-quant FP4 linear Op and `nn.QuantizedLinear` | not started |
 | 3 | MNIST MLP experiments (FP32 / Fprop / +Dgrad / +Wgrad, with and without SR) | not started |
 | 4 | CUDA quantize+pack and FP4 GEMV kernels, 4096x4096 benchmark | not started |
