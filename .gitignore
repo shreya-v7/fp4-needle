@@ -1,0 +1,11 @@
+# Build outputs (rebuilt with `make`)
+build/
+*.so
+# Python caches
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+# Datasets (downloaded/copied on Colab, too large for git)
+/data/
+# Experiment outputs
+results/
