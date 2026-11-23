@@ -37,7 +37,12 @@ jobs:
         # which CMake 4 removed, so pin CMake below 4.
         run: pip install numpy pybind11 pytest "cmake<4"
       - name: Build needle backends
-        run: make lib
+        # CMakeLists.txt finds Python through python3-config, which on GitHub
+        # runners is the system Python, not the one set up above. Point CMake
+        # at the same interpreter that runs the tests so the .so matches it.
+        run: |
+          cmake -S . -B build -DPython_EXECUTABLE="$(which python)"
+          cmake --build build
       - name: Run FP4 tests
         env:
           PYTHONPATH: ./python
