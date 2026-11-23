@@ -1,0 +1,50 @@
+# Checks every pull request into main, and every commit that lands on main.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  # Team rule: work happens on branches named dev/<firstname>-<topic>.
+  branch-name:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch name is dev/<firstname>-<topic>
+        if: github.event_name == 'pull_request'
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          if [[ "$BRANCH" =~ ^dev/[a-z]+-[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "OK: $BRANCH"
+          else
+            echo "::error::Branch '$BRANCH' must be named dev/<firstname>-<topic> (lowercase), e.g. dev/shreya-stage2-fake-quant"
+            exit 1
+          fi
+
+  # Build the CPU backend and run our FP4 tests (no GPU on GitHub runners).
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build and test tools
+        # CMakeLists.txt uses the old FindCUDA module (policy CMP0146 OLD),
+        # which CMake 4 removed, so pin CMake below 4.
+        run: pip install numpy pybind11 pytest "cmake<4"
+      - name: Build needle backends
+        run: make lib
+      - name: Run FP4 tests
+        env:
+          PYTHONPATH: ./python
+          NEEDLE_BACKEND: nd
+        run: |
+          if [ -d tests/fp4 ]; then
+            python -m pytest tests/fp4 -v
+          else
+            echo "No tests/fp4 directory yet; nothing to run."
+          fi
