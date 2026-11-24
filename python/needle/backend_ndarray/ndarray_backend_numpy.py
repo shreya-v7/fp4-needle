@@ -105,6 +105,15 @@ def ewise_tanh(a, out):
     out.array[:] = np.tanh(a.array)
 
 
+# Added for FP4 quantization (python/needle/fp4/quantize.py).
+def ewise_floor(a, out):
+    out.array[:] = np.floor(a.array)
+
+
+def ewise_abs(a, out):
+    out.array[:] = np.abs(a.array)
+
+
 def matmul(a, b, out, m, n, p):
     out.array[:] = (a.array.reshape(m, n) @ b.array.reshape(n, p)).reshape(-1)
 

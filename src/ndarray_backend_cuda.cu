@@ -370,6 +370,10 @@ UNARY_OP(EwiseLog, logf(x))
 UNARY_OP(EwiseExp, expf(x))
 UNARY_OP(EwiseTanh, tanhf(x))
 
+// Added for FP4 quantization (see python/needle/fp4/quantize.py).
+UNARY_OP(EwiseFloor, floorf(x))
+UNARY_OP(EwiseAbs, fabsf(x))
+
 #undef EWISE_OP
 #undef SCALAR_OP
 #undef UNARY_OP
@@ -617,6 +621,8 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
   m.def("ewise_log", EwiseLog);
   m.def("ewise_exp", EwiseExp);
   m.def("ewise_tanh", EwiseTanh);
+  m.def("ewise_floor", EwiseFloor);
+  m.def("ewise_abs", EwiseAbs);
 
   m.def("matmul", Matmul);
 

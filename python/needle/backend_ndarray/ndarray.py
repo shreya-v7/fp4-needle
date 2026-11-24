@@ -531,6 +531,17 @@ class NDArray:
         self.device.ewise_tanh(self.compact()._handle, out._handle)
         return out
 
+    # Added for FP4 quantization (python/needle/fp4/quantize.py).
+    def floor(self):
+        out = NDArray.make(self.shape, device=self.device)
+        self.device.ewise_floor(self.compact()._handle, out._handle)
+        return out
+
+    def abs(self):
+        out = NDArray.make(self.shape, device=self.device)
+        self.device.ewise_abs(self.compact()._handle, out._handle)
+        return out
+
     ### Matrix multiplication
     def __matmul__(self, other):
         """Matrix multplication of two arrays.  This requires that both arrays
@@ -693,6 +704,14 @@ def exp(a):
 
 def tanh(a):
     return a.tanh()
+
+
+def floor(a):
+    return a.floor()
+
+
+def abs(a):
+    return a.abs()
 
 
 def sum(a, axis=None, keepdims=False):
