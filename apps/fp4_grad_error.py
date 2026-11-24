@@ -76,6 +76,9 @@ def main():
     args = parser.parse_args()
 
     device = getattr(ndl, args.device)()
+    if not device.enabled():
+        parser.error(f"needle's {args.device} backend is not built. On Colab: Runtime > "
+                     "Change runtime type > GPU, then rebuild with `make`.")
     train_set, test_set = load_mnist(args.data_dir, 0)
     np.random.seed(args.seed)
     model = make_mlp(QuantConfig(), args.hidden, device)          # FP32 model we train

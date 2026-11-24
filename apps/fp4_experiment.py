@@ -131,6 +131,9 @@ def train_one(config, args, train_set, test_set, device, writer):
 
     step = 0
     for epoch in range(1, args.epochs + 1):
+        # The DataLoader shuffles with np.random, which SR also draws from during
+        # backward. Reseeding here gives every config the same batches each epoch.
+        np.random.seed(args.seed * 1000 + epoch)
         loader = ndl.data.DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
         for batch in loader:
             X, y = to_device(batch, device)
@@ -170,6 +173,9 @@ def main():
     args = parser.parse_args()
 
     device = getattr(ndl, args.device)()
+    if not device.enabled():
+        parser.error(f"needle's {args.device} backend is not built. On Colab: Runtime > "
+                     "Change runtime type > GPU, then rebuild with `make`.")
     train_set, test_set = load_mnist(args.data_dir, args.train_subset)
     configs = CONFIG_SETS[args.configs]
     if args.only:
