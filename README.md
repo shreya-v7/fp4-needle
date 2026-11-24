@@ -20,8 +20,8 @@ JAX in project code; NumPy is used only for the reference quantizer and tests.
 |---|---|---|
 | 0 | Read the homework code, plan the changes | done |
 | 1 | NumPy reference quantizer (`python/needle/fp4/reference.py`) + tests | done |
-| 2 | Fake-quant FP4 linear Op and `nn.QuantizedLinear` | not started |
-| 3 | MNIST MLP experiments (FP32 / Fprop / +Dgrad / +Wgrad, with and without SR) | not started |
+| 2 | Fake-quant FP4 linear Op and `nn.QuantizedLinear` | done (CPU); CUDA tests run on Colab |
+| 3 | MNIST MLP experiments (FP32 / Fprop / +Dgrad / +Wgrad, with and without SR) | runner, plots, Colab notebook done |
 | 4 | CUDA quantize+pack and FP4 GEMV kernels, 4096x4096 benchmark | not started |
 
 ## NVFP4 in one paragraph
@@ -46,9 +46,12 @@ always encoded as `+0`) are documented at the top of
 
 ```
 python/needle/          needle from our homeworks (hw0 to hw4 + transformer)
-python/needle/fp4/      FP4 code we are adding (reference quantizer so far)
+python/needle/fp4/      FP4 code: NumPy reference, NDArray fake quantization, QuantConfig
+python/needle/ops/ops_fp4.py   FP4Matmul Op (each training matmul can run in FP4)
+python/needle/nn/nn_fp4.py     nn.QuantizedLinear (drop-in for nn.Linear)
 src/                    C++ (CPU) and CUDA backends, exposed with pybind11
-apps/                   models and training loops from the homeworks
+apps/                   homework models, plus fp4_experiment.py and plot_fp4.py
+notebooks/              fp4_experiments.ipynb: tests + experiments on a Colab GPU
 tests/hw4, hw4_extra/   course tests (need PyTorch and mugrade, see below)
 tests/fp4/              our FP4 tests (NumPy and pytest only)
 ```
@@ -76,6 +79,23 @@ The course tests in `tests/hw4` and `tests/hw4_extra` compare against PyTorch
 `!pip3 install --upgrade --no-deps git+https://github.com/dlsys10714/mugrade.git`.
 They also need the datasets in `data/` (not tracked in git). MNIST is in our
 Drive folder under `hw2/data`, so `!mkdir -p data && cp ../hw2/data/*.gz data/`.
+
+## Running the experiments
+
+The easiest way is `notebooks/fp4_experiments.ipynb` on Colab with a GPU runtime: it
+builds needle, runs the tests (including CUDA), and trains every configuration.
+From a terminal in the repo root:
+
+```bash
+python3 apps/fp4_experiment.py --configs all --device cuda --epochs 3 --seed 0 --out results/mnist_seed0.csv
+python3 apps/plot_fp4.py results/mnist_seed*.csv --out-dir results
+```
+
+`--configs grid` is the project grid (FP32, Fprop, Fprop+Dgrad, Fprop+Dgrad+Wgrad,
+with SR where it matters), `--configs ablation` puts one backward matmul in FP4 at a
+time, and `--configs all` runs both. Stochastic rounding applies to the gradient
+operand dY only, so "FP32 + SR" and "Fprop + SR" would equal their SR-off runs and
+are not trained twice.
 
 ## Contributing
 
