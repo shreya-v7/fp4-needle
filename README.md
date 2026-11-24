@@ -173,6 +173,26 @@ What we see:
   round-to-nearest, but the average of 32 SR gradients is closer to FP32, i.e. SR trades
   bias for noise. It does not remove all bias, because X and W are still rounded to nearest.
 
+**LSTM language model (CPU, PTB).** 1 layer, embedding and hidden size 64, the first 1000
+lines of PTB (vocabulary 4865), 3 epochs, Adam (lr 3e-3), 3 seeds. Full table:
+[`docs/results/cpu_lstm/summary.md`](docs/results/cpu_lstm/summary.md).
+
+| config | test perplexity | train loss (last 100 steps) |
+|---|---|---|
+| FP32 | 664.7 ± 1.7 | 5.985 |
+| Fprop | 671.2 ± 3.7 | 5.993 |
+| Fprop + Dgrad | 674.4 ± 3.2 | 6.002 |
+| Fprop + Dgrad + Wgrad | **651.3 ± 1.6** | 6.002 |
+| Fprop + Dgrad + Wgrad + SR | 673.4 ± 2.6 | 5.999 |
+
+* Again nothing breaks: every FP4 configuration is within about 1.5% of FP32 perplexity, and
+  the training-loss gap to FP32 grows slowly (to 0.15 to 0.3% after 207 steps).
+* All-FP4 with round-to-nearest has the *worst* training loss but the *best* test perplexity, in
+  all 3 seeds. With this little data the model generalizes poorly (train perplexity about 370,
+  test about 665), and the rounding of weight gradients (small entries become exactly zero)
+  appears to act as a regularizer. With SR, which removes that bias, the effect disappears.
+  This is worth checking with more data (`notebooks/fp4_experiments.ipynb` uses 2000 lines).
+
 Real 4-bit weights (`apps/fp4_inference.py`, CPU): the MLP's weights shrink from 1.03 MiB
 to 0.146 MiB (7.0x), and test accuracy with the packed NVFP4 weights is 94.01% vs 94.05%
 in FP32, with the same prediction on 99% of images. The LSTM language model's weights
