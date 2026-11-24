@@ -559,6 +559,8 @@ void Nvfp4Gemv(const ByteArray& packed, const ByteArray& scales, float ts, const
   using namespace nvfp4;
   const int LANES = 32;
   size_t cols_pad = padded_cols(cols), num_blocks = cols_pad / BLOCK;
+  float table[16];                                   // value of each 4-bit code
+  for (int code = 0; code < 16; code++) table[code] = e2m1_value(code);
   for (size_t r = 0; r < rows; r++) {
     float lane_acc[LANES] = {0.0f};
     for (size_t b = 0; b < num_blocks; b++) {
@@ -569,7 +571,7 @@ void Nvfp4Gemv(const ByteArray& packed, const ByteArray& scales, float ts, const
         uint8_t byte = packed.ptr[i / 2];
         int code = (j % 2 == 0) ? (byte & 0xF) : (byte >> 4);
         float xv = c < cols ? x.ptr[c] : 0.0f;
-        s = add_rn(s, mul_rn(e2m1_value(code), xv));
+        s = add_rn(s, mul_rn(table[code], xv));
       }
       int lane = b % LANES;
       lane_acc[lane] = add_rn(lane_acc[lane], mul_rn(s, scale));
