@@ -6,6 +6,8 @@
 #include <iostream>
 #include <sstream>
 
+#include "nvfp4.h"  // NVFP4 arithmetic shared with the CPU backend
+
 namespace needle {
 namespace cuda {
 
@@ -557,6 +559,258 @@ void ReduceSum(const CudaArray& a, CudaArray* out, size_t reduce_size) {
   /// END SOLUTION
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
+// NVFP4 (Stage 4): packed 4-bit storage, quantize+pack, dequantize, GEMV
+//
+// Same storage layout and arithmetic as the CPU versions in
+// ndarray_backend_cpu.cc (read those first: they are the step-by-step
+// versions). A (rows, cols) matrix is blocked along cols, zero-padded to
+// padded_cols = multiple of 16:
+//   packed: rows * padded_cols / 2 bytes (element 2i low nibble, 2i+1 high)
+//   scales: rows * padded_cols / 16 E4M3 bytes
+////////////////////////////////////////////////////////////////////////////////
+
+#define FULL_MASK 0xffffffffu
+#define WARP_SIZE 32
+
+// Stop with a readable error if the last kernel launch failed.
+#define CUDA_CHECK_LAUNCH()                                                   \
+  do {                                                                        \
+    cudaError_t err = cudaGetLastError();                                     \
+    if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err)); \
+  } while (0)
+
+/** Byte buffer on the GPU for packed codes and E4M3 scales. */
+struct CudaByteArray {
+  CudaByteArray(const size_t size) {
+    cudaError_t err = cudaMalloc(&ptr, size == 0 ? 1 : size);
+    if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+    this->size = size;
+  }
+  ~CudaByteArray() { cudaFree(ptr); }
+  uint8_t* ptr;
+  size_t size;
+};
+
+// ---- (a) quantize + pack ----------------------------------------------------
+
+__global__ void AbsMaxKernel(const scalar_t* a, size_t size, float* out) {
+  /**
+   * out = max |a| over the whole array. Each thread takes a strided slice,
+   * the warp combines its 32 values with __shfl_xor_sync, and one lane per
+   * warp publishes the result with atomicMax. (For nonnegative floats the
+   * IEEE bit pattern orders like the value, so atomicMax on the bits works.)
+   */
+  float m = 0.0f;
+  for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += gridDim.x * blockDim.x)
+    m = fmaxf(m, fabsf(a[i]));
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2)
+    m = fmaxf(m, __shfl_xor_sync(FULL_MASK, m, offset));
+  if (threadIdx.x % WARP_SIZE == 0) atomicMax((int*)out, __float_as_int(m));
+}
+
+__global__ void Nvfp4QuantizePackKernel(const scalar_t* a, const scalar_t* rand, size_t rows,
+                                        size_t cols, size_t cols_pad, const float* tensor_scale,
+                                        uint8_t* packed, uint8_t* scales) {
+  /**
+   * One thread per element of the padded (rows, cols_pad) matrix. Because
+   * cols_pad is a multiple of 16 and warps start at multiples of 32, every
+   * block of 16 elements is exactly one half-warp, so:
+   *   - the block amax is a __shfl_xor_sync reduction with offsets 8, 4, 2, 1
+   *     (which never crosses between the two half-warps);
+   *   - each even thread fetches its odd neighbour's code with
+   *     __shfl_down_sync and writes the packed byte.
+   * All 32 threads of a warp must reach the shuffles, so threads past the end
+   * keep going with value 0 and only skip the writes.
+   */
+  using namespace nvfp4;
+  size_t g = blockIdx.x * blockDim.x + threadIdx.x;
+  bool active = g < rows * cols_pad;
+  size_t r = g / cols_pad, c = g % cols_pad;
+  bool real = active && c < cols;                         // not padding
+  float x = real ? a[r * cols + c] : 0.0f;
+  float ts = *tensor_scale;
+
+  float block_amax = fabsf(x);
+  for (int offset = BLOCK / 2; offset > 0; offset /= 2)
+    block_amax = fmaxf(block_amax, __shfl_xor_sync(FULL_MASK, block_amax, offset));
+
+  float bs = block_scale(block_amax, ts);
+  float scale = mul_rn(bs, ts);
+  float v = scale > 0.0f ? div_rn(x, scale) : 0.0f;
+  float u = (rand != nullptr && real) ? rand[r * cols + c] : 0.0f;
+  int code = e2m1_encode(v, rand != nullptr, u);
+  int next_code = __shfl_down_sync(FULL_MASK, code, 1);   // the odd neighbour's code
+
+  if (active && g % 2 == 0) packed[g / 2] = (uint8_t)(code | (next_code << 4));
+  if (active && g % BLOCK == 0) scales[g / BLOCK] = encode_e4m3(bs);
+}
+
+float Nvfp4QuantizePack(const CudaArray& a, size_t rows, size_t cols, const CudaArray* rand,
+                        CudaByteArray* packed, CudaByteArray* scales) {
+  /** Quantize a compact (rows, cols) matrix to packed NVFP4; returns the tensor scale. */
+  size_t cols_pad = nvfp4::padded_cols(cols);
+  float* d_amax;   // amax, then (overwritten) tensor scale, kept on the device
+  cudaMalloc(&d_amax, sizeof(float));
+  cudaMemset(d_amax, 0, sizeof(float));
+  AbsMaxKernel<<<256, BASE_THREAD_NUM>>>(a.ptr, rows * cols, d_amax);
+  CUDA_CHECK_LAUNCH();
+
+  float amax;
+  cudaMemcpy(&amax, d_amax, sizeof(float), cudaMemcpyDeviceToHost);
+  float ts = nvfp4::tensor_scale_from_amax(amax);
+  cudaMemcpy(d_amax, &ts, sizeof(float), cudaMemcpyHostToDevice);
+
+  CudaDims dim = CudaOneDim(rows * cols_pad);
+  Nvfp4QuantizePackKernel<<<dim.grid, dim.block>>>(a.ptr, rand ? rand->ptr : nullptr, rows, cols,
+                                                   cols_pad, d_amax, packed->ptr, scales->ptr);
+  CUDA_CHECK_LAUNCH();
+  cudaFree(d_amax);
+  return ts;
+}
+
+// ---- dequantize -------------------------------------------------------------
+
+__global__ void Nvfp4DequantizeKernel(const uint8_t* packed, const uint8_t* scales, float ts,
+                                      size_t rows, size_t cols, size_t cols_pad, scalar_t* out) {
+  using namespace nvfp4;
+  size_t g = blockIdx.x * blockDim.x + threadIdx.x;
+  if (g >= rows * cols) return;
+  size_t r = g / cols, c = g % cols, i = r * cols_pad + c;
+  uint8_t byte = packed[i / 2];
+  int code = (i % 2 == 0) ? (byte & 0xF) : (byte >> 4);
+  out[g] = mul_rn(e2m1_value(code), mul_rn(decode_e4m3(scales[i / BLOCK]), ts));
+}
+
+void Nvfp4Dequantize(const CudaByteArray& packed, const CudaByteArray& scales, float ts,
+                     size_t rows, size_t cols, CudaArray* out) {
+  CudaDims dim = CudaOneDim(rows * cols);
+  Nvfp4DequantizeKernel<<<dim.grid, dim.block>>>(packed.ptr, scales.ptr, ts, rows, cols,
+                                                 nvfp4::padded_cols(cols), out->ptr);
+  CUDA_CHECK_LAUNCH();
+}
+
+// ---- (b) dequantize + GEMV --------------------------------------------------
+
+__global__ void Nvfp4GemvKernel(const uint8_t* packed, const uint8_t* scales, float ts,
+                                const scalar_t* x, scalar_t* y, size_t rows, size_t cols,
+                                size_t cols_pad) {
+  /**
+   * y = W x, one warp per output row. Lane l reads blocks l, l+32, ...: each
+   * block is 8 bytes of codes (one 64-bit load; neighbouring lanes read
+   * neighbouring 8-byte chunks, so a warp reads 256 contiguous bytes at once)
+   * plus one scale byte. Codes are turned into values with a 16-entry table in
+   * shared memory, products are accumulated in FP32, and the 32 lane sums are
+   * combined with a __shfl_xor_sync butterfly. Same order as the CPU version.
+   */
+  using namespace nvfp4;
+  __shared__ float table[16];
+  if (threadIdx.x < 16) table[threadIdx.x] = e2m1_value(threadIdx.x);
+  __syncthreads();
+
+  size_t row = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+  int lane = threadIdx.x % WARP_SIZE;
+  if (row >= rows) return;                      // whole warps exit together
+
+  size_t num_blocks = cols_pad / BLOCK;
+  const uint8_t* row_codes = packed + row * (cols_pad / 2);
+  float acc = 0.0f;
+  for (size_t b = lane; b < num_blocks; b += WARP_SIZE) {
+    uint2 bytes8 = *reinterpret_cast<const uint2*>(row_codes + b * 8);  // 16 codes
+    float scale = mul_rn(decode_e4m3(scales[row * num_blocks + b]), ts);
+    float s = 0.0f;
+    for (int k = 0; k < 8; k++) {
+      uint32_t word = k < 4 ? bytes8.x : bytes8.y;
+      uint32_t byte = (word >> (8 * (k % 4))) & 0xFF;     // little-endian: byte k
+      size_t c = b * BLOCK + 2 * k;
+      float x0 = c < cols ? x[c] : 0.0f, x1 = c + 1 < cols ? x[c + 1] : 0.0f;
+      s = add_rn(s, mul_rn(table[byte & 0xF], x0));       // element 2k (low nibble)
+      s = add_rn(s, mul_rn(table[byte >> 4], x1));        // element 2k+1 (high nibble)
+    }
+    acc = add_rn(acc, mul_rn(s, scale));
+  }
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2)
+    acc = add_rn(acc, __shfl_xor_sync(FULL_MASK, acc, offset));
+  if (lane == 0) y[row] = acc;
+}
+
+__global__ void GemvFp32Kernel(const scalar_t* w, const scalar_t* x, scalar_t* y, size_t rows,
+                               size_t cols) {
+  /** Baseline FP32 y = W x with the same structure: one warp per row, lanes stride the row. */
+  size_t row = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+  int lane = threadIdx.x % WARP_SIZE;
+  if (row >= rows) return;
+  const scalar_t* w_row = w + row * cols;
+  float acc = 0.0f;
+  if (cols % 4 == 0) {   // 16-byte loads when every row starts 16-byte aligned
+    const float4* w4 = reinterpret_cast<const float4*>(w_row);
+    const float4* x4 = reinterpret_cast<const float4*>(x);
+    for (size_t i = lane; i < cols / 4; i += WARP_SIZE) {
+      float4 a = w4[i], b = x4[i];
+      acc += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    }
+  } else {
+    for (size_t i = lane; i < cols; i += WARP_SIZE) acc += w_row[i] * x[i];
+  }
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2)
+    acc += __shfl_xor_sync(FULL_MASK, acc, offset);
+  if (lane == 0) y[row] = acc;
+}
+
+// One warp per row: blocks of 256 threads cover 8 rows.
+static dim3 GemvGrid(size_t rows) {
+  return dim3((rows * WARP_SIZE + BASE_THREAD_NUM - 1) / BASE_THREAD_NUM);
+}
+
+void Nvfp4Gemv(const CudaByteArray& packed, const CudaByteArray& scales, float ts,
+               const CudaArray& x, CudaArray* y, size_t rows, size_t cols) {
+  Nvfp4GemvKernel<<<GemvGrid(rows), BASE_THREAD_NUM>>>(packed.ptr, scales.ptr, ts, x.ptr, y->ptr,
+                                                       rows, cols, nvfp4::padded_cols(cols));
+  CUDA_CHECK_LAUNCH();
+}
+
+void GemvFp32(const CudaArray& w, const CudaArray& x, CudaArray* y, size_t rows, size_t cols) {
+  GemvFp32Kernel<<<GemvGrid(rows), BASE_THREAD_NUM>>>(w.ptr, x.ptr, y->ptr, rows, cols);
+  CUDA_CHECK_LAUNCH();
+}
+
+// ---- benchmarking helpers ---------------------------------------------------
+
+template <typename Launch>
+float TimeKernelMs(Launch launch, int warmup, int iters) {
+  /**
+   * Average milliseconds per launch, measured with CUDA events on the GPU
+   * itself, after `warmup` untimed launches (first launches pay one-time
+   * costs). The final event synchronize makes sure all work has finished.
+   */
+  for (int i = 0; i < warmup; i++) launch();
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  cudaEventRecord(start);
+  for (int i = 0; i < iters; i++) launch();
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  CUDA_CHECK_LAUNCH();
+  float ms = 0.0f;
+  cudaEventElapsedTime(&ms, start, stop);
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+  return ms / iters;
+}
+
+float BenchNvfp4Gemv(const CudaByteArray& packed, const CudaByteArray& scales, float ts,
+                     const CudaArray& x, CudaArray* y, size_t rows, size_t cols, int warmup,
+                     int iters) {
+  return TimeKernelMs([&] { Nvfp4Gemv(packed, scales, ts, x, y, rows, cols); }, warmup, iters);
+}
+
+float BenchGemvFp32(const CudaArray& w, const CudaArray& x, CudaArray* y, size_t rows,
+                    size_t cols, int warmup, int iters) {
+  return TimeKernelMs([&] { GemvFp32(w, x, y, rows, cols); }, warmup, iters);
+}
+
 }  // namespace cuda
 }  // namespace needle
 
@@ -628,4 +882,41 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
+
+  // NVFP4 (Stage 4)
+  py::class_<CudaByteArray>(m, "ByteArray")
+      .def(py::init<size_t>(), py::return_value_policy::take_ownership)
+      .def_readonly("size", &CudaByteArray::size);
+  m.def("bytes_to_numpy", [](const CudaByteArray& a) {
+    py::array_t<uint8_t> out(a.size);
+    cudaError_t err = cudaMemcpy(out.mutable_data(), a.ptr, a.size, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+    return out;
+  });
+  m.def("bytes_from_numpy", [](py::array_t<uint8_t> a, CudaByteArray* out) {
+    cudaError_t err = cudaMemcpy(out->ptr, a.request().ptr, out->size, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+  });
+  m.def("nvfp4_quantize_pack", Nvfp4QuantizePack, py::arg("a"), py::arg("rows"),
+        py::arg("cols"), py::arg("rand").none(true), py::arg("packed"), py::arg("scales"));
+  m.def("nvfp4_dequantize", Nvfp4Dequantize);
+  m.def("nvfp4_gemv", Nvfp4Gemv);
+  m.def("gemv_fp32", GemvFp32);
+  m.def("bench_nvfp4_gemv", BenchNvfp4Gemv);
+  m.def("bench_gemv_fp32", BenchGemvFp32);
+  m.def("synchronize", [] { cudaDeviceSynchronize(); });
+  m.def("device_info", [] {
+    // Peak DRAM bandwidth = 2 transfers per clock (DDR) * memory clock * bus width.
+    int dev, clock_khz, bus_bits;
+    cudaGetDevice(&dev);
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, dev);
+    cudaDeviceGetAttribute(&clock_khz, cudaDevAttrMemoryClockRate, dev);
+    cudaDeviceGetAttribute(&bus_bits, cudaDevAttrGlobalMemoryBusWidth, dev);
+    py::dict info;
+    info["name"] = std::string(prop.name);
+    info["peak_bandwidth_gb_s"] = 2.0 * clock_khz * 1e3 * (bus_bits / 8.0) / 1e9;
+    info["memory_gb"] = prop.totalGlobalMem / 1e9;
+    return info;
+  });
 }

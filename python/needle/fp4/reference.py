@@ -311,3 +311,51 @@ def fake_quant(x: np.ndarray, axis: int = -1, stochastic: bool = False,
     can represent. This is what training in FP4 "sees".
     """
     return dequantize(quantize_nvfp4(x, axis, stochastic, rand, rng))
+
+
+# ----------------------------------------------------------------------------
+# NVFP4 matrix-vector product (the reference for the Stage 4 GEMV kernels)
+# ----------------------------------------------------------------------------
+
+GEMV_LANES = 32   # one CUDA warp computes one output row
+
+
+def nvfp4_gemv(q: NVFP4Tensor, x: np.ndarray) -> np.ndarray:
+    """y = W x for W stored in NVFP4 (quantized along axis 1), x in float32.
+
+    Floating-point addition is not associative, so to be bit-identical to the
+    kernels this adds in exactly their order (see Nvfp4Gemv in the backends):
+      1. per block of 16: s = sum of e2m1_value(code) * x, one element at a time;
+      2. "lane" l of 32 accumulates blocks l, l+32, l+64, ...:
+             lane_acc += s * (block_scale * tensor_scale);
+      3. butterfly over lanes: for offset 16, 8, 4, 2, 1:
+             lane_acc[l] = lane_acc[l] + lane_acc[l XOR offset].
+    Each step is one float32 operation, rounded on its own.
+    """
+    assert len(q.shape) == 2 and q.axis == 1, "W must be 2-D and blocked along its columns"
+    rows, cols = q.shape
+    codes = unpack_fp4(q.packed)                                    # (rows, cols_pad)
+    num_blocks = codes.shape[1] // q.block_size
+    values = e2m1_decode(codes).reshape(rows, num_blocks, q.block_size)
+    x_pad = np.zeros(num_blocks * q.block_size, dtype=np.float32)
+    x_pad[:cols] = x
+    x_blocks = x_pad.reshape(num_blocks, q.block_size)
+
+    # 1. Per-block partial sums, accumulated element by element.
+    s = np.zeros((rows, num_blocks), dtype=np.float32)
+    for j in range(q.block_size):
+        s = s + values[:, :, j] * x_blocks[:, j]
+    scale = (q.block_scales * q.tensor_scale).astype(np.float32)    # (rows, num_blocks)
+
+    # 2. Lane accumulation: block b goes to lane b % 32, in increasing b.
+    lane_acc = np.zeros((rows, GEMV_LANES), dtype=np.float32)
+    for b in range(num_blocks):
+        lane_acc[:, b % GEMV_LANES] = lane_acc[:, b % GEMV_LANES] + s[:, b] * scale[:, b]
+
+    # 3. Butterfly reduction across lanes.
+    lanes = np.arange(GEMV_LANES)
+    offset = GEMV_LANES // 2
+    while offset:
+        lane_acc = lane_acc + lane_acc[:, lanes ^ offset]
+        offset //= 2
+    return lane_acc[:, 0].astype(np.float32)

@@ -6,6 +6,8 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "nvfp4.h"  // NVFP4 arithmetic shared with the CUDA backend
+
 namespace needle {
 namespace cpu {
 
@@ -446,6 +448,151 @@ void ReduceSum(const AlignedArray& a, AlignedArray* out, size_t reduce_size) {
   /// END SOLUTION
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
+// NVFP4 (Stage 4): packed 4-bit storage, quantize+pack, dequantize, GEMV
+//
+// A matrix W of shape (rows, cols) is stored blocked along `cols` (each row's
+// reduction axis for y = W x):
+//   packed: rows * padded_cols / 2 bytes, two 4-bit codes per byte; element 2i
+//           in the low nibble, element 2i+1 in the high nibble
+//   scales: rows * padded_cols / 16 bytes, one E4M3 block scale per 16 elements
+//   tensor_scale: one float
+// Columns are zero-padded up to a multiple of 16 (nvfp4::padded_cols).
+//
+// These CPU versions are the readable, step-by-step versions of the CUDA
+// kernels in ndarray_backend_cuda.cu, and produce bit-identical results.
+////////////////////////////////////////////////////////////////////////////////
+
+/** Plain byte buffer for packed codes and E4M3 scales (Array only holds floats). */
+struct ByteArray {
+  ByteArray(const size_t size) {
+    int ret = posix_memalign((void**)&ptr, ALIGNMENT, size == 0 ? 1 : size);
+    if (ret != 0) throw std::bad_alloc();
+    this->size = size;
+  }
+  ~ByteArray() { free(ptr); }
+  uint8_t* ptr;
+  size_t size;
+};
+
+float Nvfp4QuantizePack(const AlignedArray& a, size_t rows, size_t cols,
+                        const AlignedArray* rand, ByteArray* packed, ByteArray* scales) {
+  /**
+   * Quantize a compact (rows, cols) float matrix to NVFP4 and pack it.
+   *
+   * Args:
+   *   a: input matrix, row-major
+   *   rand: uniforms in [0, 1) with a's shape for stochastic rounding, or None
+   *   packed, scales: outputs, sized as described above
+   * Returns:
+   *   the per-tensor FP32 scale
+   */
+  using namespace nvfp4;
+  size_t cols_pad = padded_cols(cols);
+
+  // 1. Per-tensor scale from the absolute maximum of the whole matrix.
+  float amax = 0.0f;
+  for (size_t i = 0; i < rows * cols; i++) amax = std::fmax(amax, std::fabs(a.ptr[i]));
+  float ts = tensor_scale_from_amax(amax);
+
+  for (size_t r = 0; r < rows; r++) {
+    for (size_t c0 = 0; c0 < cols_pad; c0 += BLOCK) {
+      // 2. Block amax over 16 elements (padding counts as 0).
+      float block[BLOCK], block_amax = 0.0f;
+      for (int j = 0; j < BLOCK; j++) {
+        size_t c = c0 + j;
+        block[j] = c < cols ? a.ptr[r * cols + c] : 0.0f;
+        block_amax = std::fmax(block_amax, std::fabs(block[j]));
+      }
+      // 3. E4M3 block scale; the element scale is block scale * tensor scale.
+      float bs = block_scale(block_amax, ts);
+      float scale = mul_rn(bs, ts);
+      size_t block_id = (r * cols_pad + c0) / BLOCK;
+      scales->ptr[block_id] = encode_e4m3(bs);
+
+      // 4. Round each element to a 4-bit code and pack pairs into bytes.
+      uint8_t codes[BLOCK];
+      for (int j = 0; j < BLOCK; j++) {
+        size_t c = c0 + j;
+        float v = scale > 0.0f ? div_rn(block[j], scale) : 0.0f;
+        float u = (rand != nullptr && c < cols) ? rand->ptr[r * cols + c] : 0.0f;
+        codes[j] = e2m1_encode(v, rand != nullptr, u);
+      }
+      for (int j = 0; j < BLOCK; j += 2)
+        packed->ptr[(r * cols_pad + c0 + j) / 2] = codes[j] | (codes[j + 1] << 4);
+    }
+  }
+  return ts;
+}
+
+void Nvfp4Dequantize(const ByteArray& packed, const ByteArray& scales, float ts, size_t rows,
+                     size_t cols, AlignedArray* out) {
+  /** Expand a packed NVFP4 matrix back to a compact (rows, cols) float matrix. */
+  using namespace nvfp4;
+  size_t cols_pad = padded_cols(cols);
+  for (size_t r = 0; r < rows; r++) {
+    for (size_t c = 0; c < cols; c++) {
+      size_t i = r * cols_pad + c;                       // index in the padded matrix
+      uint8_t byte = packed.ptr[i / 2];
+      int code = (i % 2 == 0) ? (byte & 0xF) : (byte >> 4);
+      float scale = mul_rn(decode_e4m3(scales.ptr[i / BLOCK]), ts);
+      out->ptr[r * cols + c] = mul_rn(e2m1_value(code), scale);
+    }
+  }
+}
+
+void Nvfp4Gemv(const ByteArray& packed, const ByteArray& scales, float ts, const AlignedArray& x,
+               AlignedArray* y, size_t rows, size_t cols) {
+  /**
+   * y = W x with W in packed NVFP4, x and y in float32.
+   *
+   * The summation order is fixed so the CPU, the CUDA kernel and the NumPy
+   * reference (reference.nvfp4_gemv) agree bit for bit. It is the order of the
+   * CUDA kernel, where one warp of 32 "lanes" computes one output row:
+   *   - lane l handles blocks l, l+32, l+64, ... of the row;
+   *   - per block: s = sum over its 16 elements of table[code] * x, in order,
+   *     then lane_acc += s * (block scale * tensor scale);
+   *   - finally the 32 lane sums are combined by a butterfly: for offset
+   *     16, 8, 4, 2, 1, every lane adds the value of lane (l XOR offset).
+   */
+  using namespace nvfp4;
+  const int LANES = 32;
+  size_t cols_pad = padded_cols(cols), num_blocks = cols_pad / BLOCK;
+  for (size_t r = 0; r < rows; r++) {
+    float lane_acc[LANES] = {0.0f};
+    for (size_t b = 0; b < num_blocks; b++) {
+      float scale = mul_rn(decode_e4m3(scales.ptr[r * num_blocks + b]), ts);
+      float s = 0.0f;
+      for (int j = 0; j < BLOCK; j++) {
+        size_t c = b * BLOCK + j, i = r * cols_pad + c;
+        uint8_t byte = packed.ptr[i / 2];
+        int code = (j % 2 == 0) ? (byte & 0xF) : (byte >> 4);
+        float xv = c < cols ? x.ptr[c] : 0.0f;
+        s = add_rn(s, mul_rn(e2m1_value(code), xv));
+      }
+      int lane = b % LANES;
+      lane_acc[lane] = add_rn(lane_acc[lane], mul_rn(s, scale));
+    }
+    for (int offset = LANES / 2; offset > 0; offset /= 2) {  // butterfly reduction
+      float next[LANES];
+      for (int l = 0; l < LANES; l++) next[l] = add_rn(lane_acc[l], lane_acc[l ^ offset]);
+      for (int l = 0; l < LANES; l++) lane_acc[l] = next[l];
+    }
+    y->ptr[r] = lane_acc[0];
+  }
+}
+
+void GemvFp32(const AlignedArray& w, const AlignedArray& x, AlignedArray* y, size_t rows,
+              size_t cols) {
+  /** Plain float32 y = W x (the baseline the FP4 GEMV is compared with). */
+  for (size_t r = 0; r < rows; r++) {
+    float acc = 0.0f;
+    for (size_t c = 0; c < cols; c++) acc += w.ptr[r * cols + c] * x.ptr[c];
+    y->ptr[r] = acc;
+  }
+}
+
 }  // namespace cpu
 }  // namespace needle
 
@@ -508,4 +655,20 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
+
+  // NVFP4 (Stage 4)
+  py::class_<ByteArray>(m, "ByteArray")
+      .def(py::init<size_t>(), py::return_value_policy::take_ownership)
+      .def_readonly("size", &ByteArray::size);
+  m.def("bytes_to_numpy", [](const ByteArray& a) {
+    return py::array_t<uint8_t>(a.size, a.ptr);   // copies
+  });
+  m.def("bytes_from_numpy", [](py::array_t<uint8_t> a, ByteArray* out) {
+    std::memcpy(out->ptr, a.request().ptr, out->size);
+  });
+  m.def("nvfp4_quantize_pack", Nvfp4QuantizePack, py::arg("a"), py::arg("rows"),
+        py::arg("cols"), py::arg("rand").none(true), py::arg("packed"), py::arg("scales"));
+  m.def("nvfp4_dequantize", Nvfp4Dequantize);
+  m.def("nvfp4_gemv", Nvfp4Gemv);
+  m.def("gemv_fp32", GemvFp32);
 }

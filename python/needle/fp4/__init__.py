@@ -8,5 +8,5 @@ Modules:
 The FP4 linear Op lives in needle.ops.ops_fp4 and the layer in
 needle.nn.nn_fp4 (nn.QuantizedLinear).
 """
-from . import reference, quantize, config
+from . import reference, quantize, config, packed
 from .config import QuantConfig
