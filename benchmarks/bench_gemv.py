@@ -96,6 +96,41 @@ def bench_size(device, n, warmup, iters):
     return rows
 
 
+def plot(rows, path, peak):
+    """Two panels per matrix size: kernel time, and achieved bandwidth (with the GPU's peak)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    kernels = [("fp32 gemv (ours)", "#2a78d6", "FP32 GEMV"), ("nvfp4 gemv (ours)", "#eb6834", "NVFP4 GEMV")]
+    sizes = sorted({r["n"] for r in rows})
+    x = np.arange(len(sizes))
+    fig, (ax_t, ax_bw) = plt.subplots(1, 2, figsize=(12, 4.2))
+    for k, (name, color, label) in enumerate(kernels):
+        t = [next(r["time_us"] for r in rows if r["n"] == n and r["kernel"] == name) for n in sizes]
+        bw = [next(r["bandwidth_GB_s"] for r in rows if r["n"] == n and r["kernel"] == name) for n in sizes]
+        ax_t.bar(x + (k - 0.5) * 0.38, t, 0.36, color=color, label=label)
+        ax_bw.bar(x + (k - 0.5) * 0.38, bw, 0.36, color=color, label=label)
+        for xi, ti in zip(x, t):
+            ax_t.annotate(f"{ti:.0f}", (xi + (k - 0.5) * 0.38, ti), ha="center", va="bottom", fontsize=8)
+    if peak:
+        ax_bw.axhline(peak, color="#555555", linestyle="--", linewidth=1)
+        ax_bw.annotate(f"GPU peak {peak:.0f} GB/s", (x[-1] + 0.4, peak), ha="right", va="bottom", fontsize=8)
+    labels = [f"{n}x{n}" for n in sizes]
+    ax_t.set(xticks=x, xticklabels=labels, ylabel="time per GEMV (microseconds)", yscale="log",
+             title="Kernel time (lower is better)")
+    ax_bw.set(xticks=x, xticklabels=labels, ylabel="achieved bandwidth (GB/s)",
+              title="Memory bandwidth used (higher is better)")
+    for ax in (ax_t, ax_bw):
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(True, axis="y", color="#e5e5e5", linewidth=0.8)
+        ax.legend(frameon=False, fontsize=8)
+    fig.suptitle("y = W x with W stored in FP32 vs NVFP4 (4-bit codes + E4M3 block scales)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    print("wrote", path)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
@@ -135,6 +170,7 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
     print("wrote", args.out)
+    plot(rows, os.path.splitext(args.out)[0] + ".png", peak)
 
 
 if __name__ == "__main__":

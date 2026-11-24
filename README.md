@@ -22,7 +22,8 @@ JAX in project code; NumPy is used only for the reference quantizer and tests.
 | 1 | NumPy reference quantizer (`python/needle/fp4/reference.py`) + tests | done |
 | 2 | Fake-quant FP4 linear Op and `nn.QuantizedLinear` | done (CPU); CUDA tests run on Colab |
 | 3 | MNIST MLP experiments (FP32 / Fprop / +Dgrad / +Wgrad, with and without SR) | done on CPU (below); GPU runs via the notebook |
-| 4 | CUDA quantize+pack and FP4 GEMV kernels, 4096x4096 benchmark | not started |
+| 4 | Packed NVFP4 storage, quantize+pack and FP4 GEMV kernels (CPU + CUDA), GEMV benchmark, 4-bit inference | done; CPU bit-exact, CUDA tests and benchmark run on Colab |
+| + | LSTM language model with FP4 matmuls (PTB) | done (below) |
 
 ## NVFP4 in one paragraph
 
@@ -37,20 +38,37 @@ block_scale  = round_to_e4m3((amax(block) / 6) / tensor_scale)
 value        = e2m1(code) * block_scale * tensor_scale
 ```
 
-Two 4-bit codes are packed per byte (element `2i` in the low nibble). Our
+Two 4-bit codes are packed per byte (element `2i` in the low nibble). A 4096 x 4096
+weight matrix takes 64 MiB in FP32 and 9 MiB in NVFP4 (8 MiB of codes + 1 MiB of
+scales), about 7x less. Our
 rounding conventions (ties to even, stochastic rounding only on elements, zero
 always encoded as `+0`) are documented at the top of
 [`python/needle/fp4/reference.py`](python/needle/fp4/reference.py).
+
+## Two ways we use FP4
+
+* **Fake quantization (training experiments).** Every matmul operand is rounded to a
+  value NVFP4 can represent, then an ordinary FP32 matmul runs. This reproduces FP4's
+  effect on *accuracy* exactly, but stores everything in FP32 and adds work, so these
+  runs are slower than FP32, not faster. (`fp4/quantize.py`, `ops/ops_fp4.py`)
+* **Real 4-bit storage (inference).** Weights are packed into 4-bit codes plus E4M3
+  scale bytes, and our CUDA kernel multiplies a vector directly from the packed bytes.
+  This is what saves *memory* and *time*. (`fp4/packed.py`, `src/nvfp4.h`, the
+  `Nvfp4*` kernels in `src/ndarray_backend_cuda.cu`)
 
 ## Repository layout
 
 ```
 python/needle/          needle from our homeworks (hw0 to hw4 + transformer)
-python/needle/fp4/      FP4 code: NumPy reference, NDArray fake quantization, QuantConfig
+python/needle/fp4/      FP4 code: NumPy reference, NDArray fake quantization, QuantConfig,
+                        packed.py (NVFP4Matrix: real 4-bit storage + GEMV)
 python/needle/ops/ops_fp4.py   FP4Matmul Op (each training matmul can run in FP4)
 python/needle/nn/nn_fp4.py     nn.QuantizedLinear (drop-in for nn.Linear)
-src/                    C++ (CPU) and CUDA backends, exposed with pybind11
-apps/                   homework models, plus fp4_experiment.py and plot_fp4.py
+src/                    C++ (CPU) and CUDA backends, exposed with pybind11;
+                        nvfp4.h holds the NVFP4 arithmetic both backends share
+apps/                   homework models, plus fp4_experiment.py (MNIST), fp4_lstm_experiment.py
+                        (PTB LSTM), fp4_grad_error.py, fp4_inference.py and plot_fp4.py
+benchmarks/             bench_gemv.py: FP32 vs NVFP4 GEMV kernels
 notebooks/              fp4_experiments.ipynb: tests + experiments on a Colab GPU
 docs/results/           plots and summary tables from our runs
 tests/hw4, hw4_extra/   course tests (need PyTorch and mugrade, see below)
@@ -59,27 +77,18 @@ tests/fp4/              our FP4 tests (NumPy and pytest only)
 
 ## Running on Google Colab
 
-```python
-from google.colab import drive
-drive.mount('/content/drive')
-%cd /content/drive/MyDrive/10714
-!git clone https://github.com/shreya-v7/fp4-needle.git
-%cd fp4-needle
-!pip3 install pybind11
-!make
-%set_env PYTHONPATH ./python
-%set_env NEEDLE_BACKEND nd
-!python3 -m pytest tests/fp4 -v
-```
-
-Pick a GPU runtime (Runtime > Change runtime type) so `make` also builds the
-CUDA backend. To try someone's branch: `!git fetch && git checkout dev/<name>-<topic>`.
+Open `notebooks/fp4_experiments.ipynb` from GitHub in Colab (File > Open notebook >
+GitHub), pick a GPU runtime (Runtime > Change runtime type), and Run all. It clones
+the repo into Drive, builds needle with `make` (CPU and CUDA backends), runs the tests,
+the Stage 4 benchmark and every experiment. Set `BRANCH` in the first cell to try a
+`dev/<name>-<topic>` branch. If the repo is private, add a `GITHUB_TOKEN` secret in
+Colab (the setup cell explains how).
 
 The course tests in `tests/hw4` and `tests/hw4_extra` compare against PyTorch
 (already installed on Colab) and import `mugrade`:
 `!pip3 install --upgrade --no-deps git+https://github.com/dlsys10714/mugrade.git`.
-They also need the datasets in `data/` (not tracked in git). MNIST is in our
-Drive folder under `hw2/data`, so `!mkdir -p data && cp ../hw2/data/*.gz data/`.
+They also need the datasets in `data/` (not tracked in git); the notebook downloads
+MNIST and PTB.
 
 ## Running the experiments
 
@@ -90,6 +99,10 @@ From a terminal in the repo root:
 ```bash
 python3 apps/fp4_experiment.py --configs all --device cuda --epochs 3 --seed 0 --out results/mnist_seed0.csv
 python3 apps/plot_fp4.py results/mnist_seed*.csv --out-dir results
+python3 apps/fp4_lstm_experiment.py --configs all --device cuda --epochs 3 --seed 0 --out results/lstm_seed0.csv
+python3 apps/plot_fp4.py results/lstm_seed*.csv --out-dir results/lstm --perplexity --title "PTB LSTM" --prefix lstm
+python3 benchmarks/bench_gemv.py --device cuda --sizes 1024 2048 4096 8192
+python3 apps/fp4_inference.py --device cuda
 ```
 
 `--configs grid` is the project grid (FP32, Fprop, Fprop+Dgrad, Fprop+Dgrad+Wgrad,
@@ -98,6 +111,33 @@ time, and `--configs all` runs both, and `--only NAME ...` reruns selected confi
 `apps/fp4_grad_error.py` measures each FP4 matmul's gradient error against FP32. Stochastic rounding applies to the gradient
 operand dY only, so "FP32 + SR" and "Fprop + SR" would equal their SR-off runs and
 are not trained twice.
+
+## How to read the metrics
+
+**Training experiments (accuracy question)**
+
+| metric | meaning | how to read it |
+|---|---|---|
+| train loss (smoothed) | cross-entropy on the training batches, averaged over recent steps | lower is better; curves that overlap mean FP4 did not hurt |
+| train loss vs FP32 (%) | (loss of this config / loss of FP32) - 1 | the clearest FP4 signal: +3% means 3% higher loss than FP32 at the same step; a gap that keeps growing means FP4 is hurting learning |
+| test accuracy (%) | share of test images (or next words) predicted correctly | differences smaller than the min-max bars across seeds are noise |
+| test perplexity | exp(test loss), for the language model: how many words the model is "choosing between" | lower is better; compare against FP32 |
+| gradient error vs FP32 (%) | the FP4 weight gradient's distance from the exact FP32 gradient, relative to its size | how much each FP4 matmul distorts learning; the dot (mean of 32 SR draws) shows what remains after averaging, i.e. the bias |
+| zeros % (grad_error.csv) | gradient entries that FP4 rounded to exactly 0 | underflow: those weights get no update at all |
+
+Rule of thumb: one seed and one quick epoch only show that things run. Trust a difference
+when it is larger than the spread across seeds and has the same sign in every seed.
+
+**Stage 4 benchmark (systems question)**
+
+| metric | meaning | how to read it |
+|---|---|---|
+| time_us | average time of one y = W x (CUDA events, after warm-up) | lower is better; `speedup` = FP32 time / this time |
+| weight_MiB | memory holding W | NVFP4 should be about 7x smaller (4.5 bits per value) |
+| bytes_moved_MiB | data the kernel must read or write at least once (W, x, y) | a GEMV does about 2 floating-point operations per weight, so it is limited by memory traffic, not arithmetic |
+| bandwidth_GB_s | bytes_moved / time | how fast the kernel streams memory |
+| pct_of_peak | bandwidth as a share of the GPU's peak DRAM bandwidth | near 100% means the kernel is as fast as the memory allows; if NVFP4 reaches a similar % as FP32, the speedup approaches the 7x drop in bytes |
+| rel_error | distance between the NVFP4 and FP32 GEMV outputs, relative to the FP32 output | the accuracy price of 4-bit weights for one matrix (about 10% for random Gaussian weights); fp4_inference.py shows what it means for a real model's accuracy |
 
 ## Results so far (CPU, MNIST)
 
@@ -133,8 +173,31 @@ What we see:
   round-to-nearest, but the average of 32 SR gradients is closer to FP32, i.e. SR trades
   bias for noise. It does not remove all bias, because X and W are still rounded to nearest.
 
-Next: the LSTM language model, where longer training and recurrent gradients should
-stress FP4 more than MNIST does.
+**LSTM language model (CPU, PTB).** 1 layer, embedding and hidden size 64, the first 1000
+lines of PTB (vocabulary 4865), 3 epochs, Adam (lr 3e-3), 3 seeds. Full table:
+[`docs/results/cpu_lstm/summary.md`](docs/results/cpu_lstm/summary.md).
+
+| config | test perplexity | train loss (last 100 steps) |
+|---|---|---|
+| FP32 | 664.7 ± 1.7 | 5.985 |
+| Fprop | 671.2 ± 3.7 | 5.993 |
+| Fprop + Dgrad | 674.4 ± 3.2 | 6.002 |
+| Fprop + Dgrad + Wgrad | **651.3 ± 1.6** | 6.002 |
+| Fprop + Dgrad + Wgrad + SR | 673.4 ± 2.6 | 5.999 |
+
+* Again nothing breaks: every FP4 configuration is within about 1.5% of FP32 perplexity, and
+  the training-loss gap to FP32 grows slowly (to 0.15 to 0.3% after 207 steps).
+* All-FP4 with round-to-nearest has the *worst* training loss but the *best* test perplexity, in
+  all 3 seeds. With this little data the model generalizes poorly (train perplexity about 370,
+  test about 665), and the rounding of weight gradients (small entries become exactly zero)
+  appears to act as a regularizer. With SR, which removes that bias, the effect disappears.
+  This is worth checking with more data (`notebooks/fp4_experiments.ipynb` uses 2000 lines).
+
+Real 4-bit weights (`apps/fp4_inference.py`, CPU): the MLP's weights shrink from 1.03 MiB
+to 0.146 MiB (7.0x), and test accuracy with the packed NVFP4 weights is 94.01% vs 94.05%
+in FP32, with the same prediction on 99% of images. The LSTM language model's weights
+shrink 6.2x (rows of 100 values are padded to 112). GEMV timings need a GPU: CPU kernels
+here are the readable reference versions, not optimized.
 
 ![MNIST grid](docs/results/cpu_sgd/mnist_grid.png)
 ![Gradient error](docs/results/cpu_sgd/grad_error.png)
