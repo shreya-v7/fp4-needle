@@ -170,6 +170,9 @@ def main():
     args = parser.parse_args()
 
     device = getattr(ndl, args.device)()
+    if not device.enabled():
+        parser.error(f"needle's {args.device} backend is not built. On Colab: Runtime > "
+                     "Change runtime type > GPU, then rebuild with `make`.")
     train_set, test_set = load_mnist(args.data_dir, args.train_subset)
     configs = CONFIG_SETS[args.configs]
     if args.only:

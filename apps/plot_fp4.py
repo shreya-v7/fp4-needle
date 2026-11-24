@@ -127,6 +127,9 @@ def summary(rows, path):
         tl = [s["test"][-1][1] for s in seeds if s["test"]]
         tr = [np.mean([l for _, l in s["train"][-100:]]) for s in seeds]
         t = [s["time"] for s in seeds]
+        if len(acc) < len(seeds):  # a run stopped early because its loss became inf/nan
+            lines.append(f"| {c} | {len(seeds)} | diverged in {len(seeds) - len(acc)} seed(s) | | | |")
+            continue
         lines.append(f"| {c} | {len(seeds)} | {np.mean(acc):.2f} ± {np.std(acc):.2f} | "
                      f"{np.mean(tl):.4f} | {np.mean(tr):.4f} | {np.mean(t):.0f} |")
     with open(path, "w") as f:
