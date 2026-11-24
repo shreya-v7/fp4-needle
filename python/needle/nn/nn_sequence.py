@@ -155,7 +155,7 @@ class RNN(Module):
 
 
 class LSTMCell(Module):
-    def __init__(self, input_size, hidden_size, bias=True, device=None, dtype="float32"):
+    def __init__(self, input_size, hidden_size, bias=True, device=None, dtype="float32", config=None):
         """
         A long short-term memory (LSTM) cell.
 
@@ -171,12 +171,17 @@ class LSTMCell(Module):
         bias_hh - The learnable hidden-hidden bias, of shape (4*hidden_size,).
 
         Weights and biases are initialized from U(-sqrt(k), sqrt(k)) where k = 1/hidden_size
+
+        config (FP4 project addition): an optional needle.fp4.QuantConfig. If given,
+        the two gate matmuls run through ops.fp4_matmul, exactly like
+        nn.QuantizedLinear; None (the default) keeps the original FP32 behaviour.
         """
         super().__init__()
         ### BEGIN YOUR SOLUTION
         bound = (1 / hidden_size) ** 0.5
         self.hidden_size = hidden_size
         self.sigmoid = Sigmoid()
+        self.config = config
 
         self.W_ih = Parameter(init.rand(input_size, 4 * hidden_size, low=-bound, high=bound, device=device, dtype=dtype))
         self.W_hh = Parameter(init.rand(hidden_size, 4 * hidden_size, low=-bound, high=bound, device=device, dtype=dtype))
@@ -215,7 +220,11 @@ class LSTMCell(Module):
         else:
             h0, c0 = h
 
-        gates = X @ self.W_ih + h0 @ self.W_hh
+        if self.config is None:
+            gates = X @ self.W_ih + h0 @ self.W_hh
+        else:   # FP4: both matmuls quantized according to self.config
+            gates = (ops.fp4_matmul(X, self.W_ih, self.config)
+                     + ops.fp4_matmul(h0, self.W_hh, self.config))
 
         if self.bias_ih is not None:
             gates = gates + self.bias_ih.reshape((1, 4 * self.hidden_size)).broadcast_to(gates.shape)
@@ -236,7 +245,8 @@ class LSTMCell(Module):
 
 
 class LSTM(Module):
-    def __init__(self, input_size, hidden_size, num_layers=1, bias=True, device=None, dtype="float32"):
+    def __init__(self, input_size, hidden_size, num_layers=1, bias=True, device=None, dtype="float32",
+                 config=None):
         super().__init__()
         """
         Applies a multi-layer long short-term memory (LSTM) RNN to an input sequence.
@@ -257,6 +267,7 @@ class LSTM(Module):
             of shape (4*hidden_size,).
         lstm_cells[k].bias_hh: The learnable hidden-hidden bias of the k-th layer,
             of shape (4*hidden_size,).
+        config (FP4 project addition): optional QuantConfig passed to every LSTMCell.
         """
         ### BEGIN YOUR SOLUTION
         self.num_layers = num_layers
@@ -268,6 +279,7 @@ class LSTM(Module):
                 bias=bias,
                 device=device,
                 dtype=dtype,
+                config=config,
             )
             for k in range(num_layers)
         ]
