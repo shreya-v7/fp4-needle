@@ -135,13 +135,52 @@ def summary(rows, path):
     print("wrote", path)
 
 
+def plot_grad_error(csv_path, path):
+    """Bar chart of apps/fp4_grad_error.py output: one panel per training checkpoint,
+    one bar per config (relative weight-gradient error vs FP32, mean over layers).
+    SR bars are hatched; the dot on them is the error of the mean of K SR draws,
+    i.e. what remains after averaging away SR's noise (its bias)."""
+    data = defaultdict(lambda: defaultdict(list))   # data[step][config] -> rows
+    for r in csv.DictReader(open(csv_path)):
+        data[int(r["step"])][r["config"]].append(r)
+    steps = sorted(data)
+    fig, axes = plt.subplots(1, len(steps), figsize=(5.5 * len(steps), 4.2), sharey=True)
+    axes = np.atleast_1d(axes)
+    for ax, step in zip(axes, steps):
+        configs = list(data[step])
+        for y, c in enumerate(configs):
+            err = np.mean([float(r["rel_error"]) for r in data[step][c]]) * 100
+            err_mean = np.mean([float(r["rel_error_of_mean"]) for r in data[step][c]]) * 100
+            sr = c.endswith("+sr")
+            ax.barh(y, err, height=0.7, color=style(c)["color"], hatch="//" if sr else None,
+                    edgecolor="white", linewidth=0)
+            ax.annotate(f"{err:.0f}%", (err, y), xytext=(3, 0), textcoords="offset points",
+                        va="center", fontsize=8, color="#333333")
+            if sr:
+                ax.plot(err_mean, y, "o", color="#222222", markersize=8)
+        ax.set_yticks(range(len(configs)), configs)
+        ax.invert_yaxis()
+        ax.set(xlabel="weight-gradient error vs FP32 (%)", title=f"after {step} FP32 training steps")
+        ax.grid(True, axis="x", color="#e5e5e5", linewidth=0.8)
+        ax.spines[["top", "right"]].set_visible(False)
+    sr_draws = max(int(r["sr_draws"]) for d in data.values() for rs in d.values() for r in rs)
+    fig.suptitle(f"Gradient error from each FP4 matmul (bars: one draw; dots: mean of {sr_draws} SR draws)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print("wrote", path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("csvs", nargs="+")
     parser.add_argument("--out-dir", default="results")
+    parser.add_argument("--grad-error", help="CSV from apps/fp4_grad_error.py to plot as well")
     args = parser.parse_args()
     rows = load(args.csvs)
     os.makedirs(args.out_dir, exist_ok=True)
+    if args.grad_error:
+        plot_grad_error(args.grad_error, os.path.join(args.out_dir, "grad_error.png"))
     plot(rows, GRID, "MNIST MLP: FP4 matmuls added one at a time",
          os.path.join(args.out_dir, "mnist_grid.png"))
     plot(rows, ABLATION, "MNIST MLP: one backward matmul in FP4",

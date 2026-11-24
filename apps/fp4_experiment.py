@@ -154,6 +154,8 @@ def train_one(config, args, train_set, test_set, device, writer):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--configs", choices=CONFIG_SETS, default="grid")
+    parser.add_argument("--only", nargs="+", metavar="NAME",
+                        help="train only these configs from the chosen set, e.g. --only wgrad+sr")
     parser.add_argument("--device", choices=["cpu", "cuda", "cpu_numpy"], default="cpu")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--out", default="results/mnist.csv")
@@ -170,6 +172,11 @@ def main():
     device = getattr(ndl, args.device)()
     train_set, test_set = load_mnist(args.data_dir, args.train_subset)
     configs = CONFIG_SETS[args.configs]
+    if args.only:
+        unknown = set(args.only) - {c.name for c in configs}
+        if unknown:
+            parser.error(f"unknown config(s) {sorted(unknown)}; choose from {[c.name for c in configs]}")
+        configs = [c for c in configs if c.name in args.only]
     print(f"Training {len(configs)} configs on {device}: {[c.name for c in configs]}")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
