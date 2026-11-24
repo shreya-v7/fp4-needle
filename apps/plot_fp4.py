@@ -34,22 +34,32 @@ ABLATION = ["fp32", "dgrad", "dgrad+sr", "wgrad", "wgrad+sr"]
 
 def style(config):
     family = config[:-3] if config.endswith("+sr") else config
-    return dict(color=FAMILY_COLORS[family], linestyle="--" if config.endswith("+sr") else "-",
-                linewidth=2)
+    color = FAMILY_COLORS.get(family, "#7f7f7f")   # gray for configs we have no color for
+    return dict(color=color, linestyle="--" if config.endswith("+sr") else "-", linewidth=2)
 
 
 def load(paths):
-    """rows[config][seed] -> {"train": [(step, loss)], "test": [(epoch, loss, acc)], "time": s}"""
-    rows = defaultdict(lambda: defaultdict(lambda: {"train": [], "test": [], "time": 0.0}))
-    for path in paths:
+    """rows[config][seed] -> {"train": [(step, loss)], "test": [(epoch, loss, acc)], "time": s}
+
+    If the same (config, seed) appears in more than one file (e.g. a partial run
+    and its rerun), only the file with the most finished epochs is kept."""
+    per_file = defaultdict(lambda: {"train": [], "test": [], "time": 0.0})  # (config, seed, path)
+    for path in dict.fromkeys(paths):   # ignore a file passed twice
         with open(path) as f:
             for r in csv.DictReader(f):
-                run = rows[r["config"]][r["seed"]]
+                run = per_file[(r["config"], r["seed"], path)]
                 if r["split"] == "train":
                     run["train"].append((int(r["step"]), float(r["loss"])))
                 else:
                     run["test"].append((int(r["epoch"]), float(r["loss"]), float(r["accuracy"])))
                 run["time"] = float(r["elapsed_s"])
+    rows = defaultdict(dict)
+    for (config, seed, path), run in per_file.items():
+        kept = rows[config].get(seed)
+        if kept is not None:
+            print(f"warning: {config} seed {seed} is in several files; keeping the most complete run")
+        if kept is None or len(run["test"]) > len(kept["test"]):
+            rows[config][seed] = run
     return rows
 
 
@@ -67,8 +77,9 @@ def plot(rows, configs, title, path):
     fig, (ax_loss, ax_gap, ax_acc) = plt.subplots(1, 3, figsize=(18, 4.8))
 
     def mean_curve(c):
-        """Smooth each seed's train loss, then average seeds (cut to the shortest run)."""
-        seeds = list(rows[c].values())
+        """Smooth each seed's train loss, then average seeds (cut to the shortest run).
+        Seeds that stopped early (diverged, no test row) are left out if others finished."""
+        seeds = [s for s in rows[c].values() if s["test"]] or list(rows[c].values())
         n = min(len(s["train"]) for s in seeds)
         return np.mean([smooth([l for _, l in s["train"][:n]]) for s in seeds], axis=0)
 

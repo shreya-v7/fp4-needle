@@ -258,6 +258,8 @@ def quantize_nvfp4(x: np.ndarray, axis: int = -1, stochastic: bool = False,
         rng: optional numpy Generator used when rand is None.
     """
     x = np.asarray(x, dtype=np.float32)
+    assert x.ndim >= 1, "quantize_nvfp4 needs at least a 1-D array"
+    assert np.all(np.isfinite(x)), "NVFP4 has no inf/NaN; the input must be finite"
     axis = axis % x.ndim
     bs = NVFP4_BLOCK_SIZE
 

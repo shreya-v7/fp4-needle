@@ -711,6 +711,8 @@ def floor(a):
 
 
 def abs(a):
+    # Like sum() above, this shadows the Python built-in inside this module
+    # (array_api.abs mirrors numpy.abs). Use builtins.abs for plain numbers here.
     return a.abs()
 
 

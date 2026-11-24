@@ -124,6 +124,8 @@ def fake_quant(x, axis: int, stochastic: bool = False, rand=None):
     axis = axis % ndim
     if stochastic and rand is None:
         rand = x.device.rand(*x.shape)
+    if stochastic:
+        assert tuple(rand.shape) == tuple(x.shape), f"rand has shape {rand.shape}, expected {x.shape}"
 
     # 1. Rearrange to (*other_dims, num_blocks, 16): move `axis` last, pad it
     #    with zeros to a multiple of 16, then split it into blocks.

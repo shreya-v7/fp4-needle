@@ -131,6 +131,9 @@ def train_one(config, args, train_set, test_set, device, writer):
 
     step = 0
     for epoch in range(1, args.epochs + 1):
+        # The DataLoader shuffles with np.random, which SR also draws from during
+        # backward. Reseeding here gives every config the same batches each epoch.
+        np.random.seed(args.seed * 1000 + epoch)
         loader = ndl.data.DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
         for batch in loader:
             X, y = to_device(batch, device)
