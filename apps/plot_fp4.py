@@ -64,16 +64,29 @@ def smooth(values, alpha=0.02):
 
 def plot(rows, configs, title, path):
     configs = [c for c in configs if c in rows]
-    fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(12, 4.5))
+    fig, (ax_loss, ax_gap, ax_acc) = plt.subplots(1, 3, figsize=(18, 4.8))
 
+    def mean_curve(c):
+        """Smooth each seed's train loss, then average seeds (cut to the shortest run)."""
+        seeds = list(rows[c].values())
+        n = min(len(s["train"]) for s in seeds)
+        return np.mean([smooth([l for _, l in s["train"][:n]]) for s in seeds], axis=0)
+
+    baseline = mean_curve("fp32") if "fp32" in rows else None
     for c in configs:
         seeds = list(rows[c].values())
-        # Train loss: smooth each seed, then average seeds (truncate to the shortest run).
-        n = min(len(s["train"]) for s in seeds)
-        curve = np.mean([smooth([l for _, l in s["train"][:n]]) for s in seeds], axis=0)
-        ax_loss.plot(np.arange(1, n + 1), curve, label=c, **style(c))
-        ax_loss.annotate(c, (n, curve[-1]), xytext=(4, 0), textcoords="offset points",
-                         fontsize=8, va="center", color="#333333")
+        curve = mean_curve(c)
+        steps = np.arange(1, len(curve) + 1)
+        ax_loss.plot(steps, curve, label=c, **style(c))
+
+        # Gap to FP32 in percent: small differences that overlap in the loss
+        # panel become visible here. FP32 itself is the 0% line.
+        if baseline is not None:
+            n = min(len(curve), len(baseline))
+            gap = (curve[:n] / baseline[:n] - 1) * 100
+            ax_gap.plot(steps[:n], gap, label=c, **style(c))
+            ax_gap.annotate(c, (n, gap[-1]), xytext=(4, 0), textcoords="offset points",
+                            fontsize=8, va="center", color="#333333")
 
         # Test accuracy per epoch: mean over seeds, bars show min..max.
         epochs = sorted({e for s in seeds for e, _, _ in s["test"]})
@@ -86,9 +99,14 @@ def plot(rows, configs, title, path):
 
     ax_loss.set(xlabel="training step", ylabel="train loss (smoothed)", yscale="log",
                 title="Training loss")
+    ax_loss.yaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
+    ax_loss.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    ax_loss.set_yticks([0.1, 0.2, 0.3, 0.5, 1.0, 2.0])
+    ax_gap.set(xlabel="training step", ylabel="train loss vs FP32 (%)",
+               title="Training loss relative to FP32")
     ax_acc.set(xlabel="epoch", ylabel="test accuracy (%)", title="Test accuracy (mean, min-max over seeds)")
     ax_acc.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
-    for ax in (ax_loss, ax_acc):
+    for ax in (ax_loss, ax_gap, ax_acc):
         ax.grid(True, color="#e5e5e5", linewidth=0.8)
         ax.spines[["top", "right"]].set_visible(False)
     ax_acc.legend(fontsize=8, frameon=False, loc="lower right")
