@@ -20,8 +20,8 @@ JAX in project code; NumPy is used only for the reference quantizer and tests.
 |---|---|---|
 | 0 | Read the homework code, plan the changes | done |
 | 1 | NumPy reference quantizer (`python/needle/fp4/reference.py`) + tests | done |
-| 2 | Fake-quant FP4 linear Op and `nn.QuantizedLinear` | not started |
-| 3 | MNIST MLP experiments (FP32 / Fprop / +Dgrad / +Wgrad, with and without SR) | not started |
+| 2 | Fake-quant FP4 linear Op and `nn.QuantizedLinear` | done (CPU); CUDA tests run on Colab |
+| 3 | MNIST MLP experiments (FP32 / Fprop / +Dgrad / +Wgrad, with and without SR) | done on CPU (below); GPU runs via the notebook |
 | 4 | CUDA quantize+pack and FP4 GEMV kernels, 4096x4096 benchmark | not started |
 
 ## NVFP4 in one paragraph
@@ -46,9 +46,13 @@ always encoded as `+0`) are documented at the top of
 
 ```
 python/needle/          needle from our homeworks (hw0 to hw4 + transformer)
-python/needle/fp4/      FP4 code we are adding (reference quantizer so far)
+python/needle/fp4/      FP4 code: NumPy reference, NDArray fake quantization, QuantConfig
+python/needle/ops/ops_fp4.py   FP4Matmul Op (each training matmul can run in FP4)
+python/needle/nn/nn_fp4.py     nn.QuantizedLinear (drop-in for nn.Linear)
 src/                    C++ (CPU) and CUDA backends, exposed with pybind11
-apps/                   models and training loops from the homeworks
+apps/                   homework models, plus fp4_experiment.py and plot_fp4.py
+notebooks/              fp4_experiments.ipynb: tests + experiments on a Colab GPU
+docs/results/           plots and summary tables from our runs
 tests/hw4, hw4_extra/   course tests (need PyTorch and mugrade, see below)
 tests/fp4/              our FP4 tests (NumPy and pytest only)
 ```
@@ -76,6 +80,64 @@ The course tests in `tests/hw4` and `tests/hw4_extra` compare against PyTorch
 `!pip3 install --upgrade --no-deps git+https://github.com/dlsys10714/mugrade.git`.
 They also need the datasets in `data/` (not tracked in git). MNIST is in our
 Drive folder under `hw2/data`, so `!mkdir -p data && cp ../hw2/data/*.gz data/`.
+
+## Running the experiments
+
+The easiest way is `notebooks/fp4_experiments.ipynb` on Colab with a GPU runtime: it
+builds needle, runs the tests (including CUDA), and trains every configuration.
+From a terminal in the repo root:
+
+```bash
+python3 apps/fp4_experiment.py --configs all --device cuda --epochs 3 --seed 0 --out results/mnist_seed0.csv
+python3 apps/plot_fp4.py results/mnist_seed*.csv --out-dir results
+```
+
+`--configs grid` is the project grid (FP32, Fprop, Fprop+Dgrad, Fprop+Dgrad+Wgrad,
+with SR where it matters), `--configs ablation` puts one backward matmul in FP4 at a
+time, and `--configs all` runs both, and `--only NAME ...` reruns selected configs.
+`apps/fp4_grad_error.py` measures each FP4 matmul's gradient error against FP32. Stochastic rounding applies to the gradient
+operand dY only, so "FP32 + SR" and "Fprop + SR" would equal their SR-off runs and
+are not trained twice.
+
+## Results so far (CPU, MNIST)
+
+784-256-256-10 MLP, every linear layer an `nn.QuantizedLinear`, 3 epochs, batch 128.
+SGD is our homework optimizer (lr 0.05, momentum 0.9) with 3 seeds; Adam (lr 1e-3) has 1 seed.
+Full tables: [`docs/results/cpu_sgd/summary.md`](docs/results/cpu_sgd/summary.md),
+[`docs/results/cpu_adam/summary.md`](docs/results/cpu_adam/summary.md).
+
+| config | SGD test acc (%) | SGD train loss | Adam test acc (%) | Adam train loss |
+|---|---|---|---|---|
+| FP32 | 94.90 ± 0.04 | 0.183 | 97.52 | 0.061 |
+| Fprop | 94.75 ± 0.04 | 0.190 | 97.36 | 0.068 |
+| Fprop + Dgrad | 94.74 ± 0.04 | 0.190 | 97.49 | 0.065 |
+| Fprop + Dgrad + SR | 94.67 ± 0.05 | 0.188 | 97.57 | 0.060 |
+| Fprop + Dgrad + Wgrad | 94.74 ± 0.18 | **0.197** | 97.43 | **0.071** |
+| Fprop + Dgrad + Wgrad + SR | 94.79 ± 0.09 | 0.181 | 97.66 | 0.056 |
+
+(train loss = mean of the last 100 steps; SR = stochastic rounding of the gradient dY)
+
+What we see:
+
+* **Nothing breaks on this model.** Every configuration ends within about 0.3 points of
+  FP32 test accuracy. A small MLP trained for 3 epochs is a forgiving setting.
+* **Fprop is the most expensive single matmul here:** about 3% higher training loss for
+  the whole run, and the largest change in the gradients (24 to 47% relative difference
+  in `docs/results/cpu_sgd/grad_error.png`), because it changes the function being trained.
+* **Wgrad with round-to-nearest is where gradients get damaged:** once gradients shrink
+  during training, 3 to 4.5% of weight-gradient entries round to exactly zero (FP4
+  underflow), and all-FP4 round-to-nearest has the highest training loss with both
+  optimizers.
+* **Stochastic rounding fixes it:** with SR, all-FP4 training loss is back at (or below)
+  FP32. In the gradient-error experiment a single SR gradient is noisier than
+  round-to-nearest, but the average of 32 SR gradients is closer to FP32, i.e. SR trades
+  bias for noise. It does not remove all bias, because X and W are still rounded to nearest.
+
+Next: the LSTM language model, where longer training and recurrent gradients should
+stress FP4 more than MNIST does.
+
+![MNIST grid](docs/results/cpu_sgd/mnist_grid.png)
+![Gradient error](docs/results/cpu_sgd/grad_error.png)
 
 ## Contributing
 
