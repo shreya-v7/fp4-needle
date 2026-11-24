@@ -248,6 +248,20 @@ void EwiseTanh(const AlignedArray& a, AlignedArray* out) {
     }
 }
 
+// Added for FP4 quantization: floor and absolute value, used to round
+// block scales to FP8 E4M3 (see python/needle/fp4/quantize.py).
+void EwiseFloor(const AlignedArray& a, AlignedArray* out) {
+    for (size_t i = 0; i < a.size; i++) {
+        out->ptr[i] = std::floor(a.ptr[i]);
+    }
+}
+
+void EwiseAbs(const AlignedArray& a, AlignedArray* out) {
+    for (size_t i = 0; i < a.size; i++) {
+        out->ptr[i] = std::fabs(a.ptr[i]);
+    }
+}
+
 
 /**
  * In the code the follows, use the above template to create analogous element-wise
@@ -486,6 +500,8 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
   m.def("ewise_log", EwiseLog);
   m.def("ewise_exp", EwiseExp);
   m.def("ewise_tanh", EwiseTanh);
+  m.def("ewise_floor", EwiseFloor);
+  m.def("ewise_abs", EwiseAbs);
 
   m.def("matmul", Matmul);
   m.def("matmul_tiled", MatmulTiled);
