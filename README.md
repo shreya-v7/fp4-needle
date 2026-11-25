@@ -26,6 +26,7 @@ JAX in project code; NumPy is used only for the reference quantizer and tests.
 | 1 | NumPy reference quantizer (`python/needle/fp4/reference.py`) + tests | done |
 | 2 | Fake-quant FP4 linear Op and `nn.QuantizedLinear` | done (CPU); CUDA tests run on Colab |
 | 3 | MNIST MLP experiments (FP32 / Fprop / +Dgrad / +Wgrad, with and without SR) | done on CPU (below); GPU runs via the notebook |
+| + | The same grid on CIFAR-10 (harder, so FP4's effect is easier to see) | GPU runs via the notebook |
 | 4 | Packed NVFP4 storage, quantize+pack and FP4 GEMV kernels (CPU + CUDA), GEMV benchmark, 4-bit inference | done; CPU bit-exact, CUDA tests and benchmark run on Colab |
 | + | LSTM language model with FP4 matmuls (PTB) | done (below) |
 | + | 4-bit format study (NVFP4, MXFP4, INT4, NF4) and sqrt(3) gradient-noise check | format study done on CPU (below); GPU runs via the notebook |
@@ -94,7 +95,7 @@ The course tests in `tests/hw4` and `tests/hw4_extra` compare against PyTorch
 (already installed on Colab) and import `mugrade`:
 `!pip3 install --upgrade --no-deps git+https://github.com/dlsys10714/mugrade.git`.
 They also need the datasets in `data/` (not tracked in git); the notebook downloads
-MNIST and PTB.
+MNIST, CIFAR-10 and PTB.
 
 ## Running the experiments
 
@@ -105,6 +106,8 @@ From a terminal in the repo root:
 ```bash
 python3 apps/fp4_experiment.py --configs all --device cuda --epochs 3 --seed 0 --out results/mnist_seed0.csv
 python3 apps/plot_fp4.py results/mnist_seed*.csv --out-dir results
+python3 apps/fp4_experiment.py --dataset cifar10 --configs all --device cuda --epochs 3 --seed 0 --out results/cifar_seed0.csv
+python3 apps/plot_fp4.py results/cifar_seed*.csv --out-dir results/cifar --title "CIFAR-10 MLP" --prefix cifar
 python3 apps/fp4_lstm_experiment.py --configs all --device cuda --epochs 3 --seed 0 --out results/lstm_seed0.csv
 python3 apps/plot_fp4.py results/lstm_seed*.csv --out-dir results/lstm --perplexity --title "PTB LSTM" --prefix lstm
 python3 benchmarks/bench_gemv.py --device cuda --sizes 1024 2048 4096 8192
