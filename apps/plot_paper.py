@@ -1,16 +1,13 @@
 # AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
-"""Figures and tables for the paper experiments (E2 threshold, E3 data size, E4 model size, PTQ).
+"""Figures and tables for the format study and the sqrt(3) gradient-noise check.
 
-    python3 apps/plot_paper.py threshold results/paper/gpt_threshold*.csv --out results/paper/fig_threshold.png
-    python3 apps/plot_paper.py datasize  results/paper/lstm_L*_seed*.csv  --out results/paper/fig_datasize.png
-    python3 apps/plot_paper.py scaling   results/paper/gpt_*_seed*.csv    --out results/paper/fig_scaling.png
-    python3 apps/plot_paper.py ptq       results/paper/storage/ptq.csv    --out results/paper/ptq.md
+    python3 apps/plot_paper.py threshold results/threshold/*.csv --out results/threshold/fig_threshold.png
+    python3 apps/plot_paper.py ptq       results/storage/ptq.csv --out results/storage/ptq.md
 """
 import argparse
 import csv
 import math
 import os
-import re
 from collections import defaultdict
 
 import matplotlib
@@ -37,17 +34,6 @@ def style(ax, title, xlabel, ylabel):
     ax.set(title=title, xlabel=xlabel, ylabel=ylabel)
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(True, color="#e5e5e5", linewidth=0.8)
-
-
-def final_test(rows, metric):
-    """Last test row per (config, seed) -> value; metric 'ppl', 'bpc' or 'acc'."""
-    out = {}
-    for r in rows:
-        if r["split"] == "test":
-            loss = float(r["loss"])
-            v = {"ppl": math.exp(loss), "bpc": loss / math.log(2), "acc": float(r["accuracy"])}[metric]
-            out[(r["config"], r["seed"])] = v
-    return out
 
 
 def threshold(paths, out):
@@ -91,39 +77,6 @@ def threshold(paths, out):
     print("wrote", out)
 
 
-def sweep(paths, out, pattern, metric, xlabel, title, xlog):
-    """Final metric per config vs a value parsed from each file name (data size or model size)."""
-    vals = defaultdict(lambda: defaultdict(list))
-    for p in paths:
-        m = re.search(pattern, os.path.basename(p))
-        if not m:
-            continue
-        x = m.group(1)
-        for (c, _), v in final_test(read(p), metric).items():
-            vals[c][x].append(v)
-    xs = sorted({x for c in vals for x in vals[c]}, key=lambda s: float(s) if s.replace(".", "").isdigit() else s)
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 4.5))
-    lines = [f"| config | " + " | ".join(xs) + " |", "|---|" + "---|" * len(xs)]
-    for c in vals:
-        means = [np.mean(vals[c][x]) if vals[c][x] else np.nan for x in xs]
-        a1.plot(range(len(xs)), means, marker="o", label=c, color=color(c))
-        lines.append(f"| {c} | " + " | ".join(f"{m:.3f}" if not np.isnan(m) else "" for m in means) + " |")
-        if "fp32" in vals and c != "fp32":
-            base = [np.mean(vals["fp32"][x]) if vals["fp32"][x] else np.nan for x in xs]
-            a2.plot(range(len(xs)), (np.array(means) / np.array(base) - 1) * 100, marker="o", label=c, color=color(c))
-    for ax in (a1, a2):
-        ax.set_xticks(range(len(xs)), xs)
-    style(a1, title, xlabel, f"final test {metric}")
-    style(a2, "Gap to FP32", xlabel, f"{metric} vs FP32 (%)")
-    a2.axhline(0, color="#2a78d6", linewidth=1)
-    a1.legend(frameon=False, fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out, dpi=150)
-    open(os.path.splitext(out)[0] + ".md", "w").write("\n".join(lines) + "\n")
-    print("\n".join(lines))
-    print("wrote", out)
-
-
 def ptq(paths, out):
     rows = [r for p in paths for r in read(p)]
     lines = ["| checkpoint | metric | format | bits | no rotation | rotation 16 | rotation 128 |",
@@ -140,19 +93,13 @@ def ptq(paths, out):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("kind", choices=["threshold", "datasize", "scaling", "ptq"])
+    p.add_argument("kind", choices=["threshold", "ptq"])
     p.add_argument("paths", nargs="+")
     p.add_argument("--out", required=True)
     a = p.parse_args()
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     if a.kind == "threshold":
         threshold(a.paths, a.out)
-    elif a.kind == "datasize":
-        sweep(a.paths, a.out, r"_L(\d+)_", "ppl", "PTB lines used for training (0 = all 42068)",
-              "LSTM: test perplexity vs data size", False)
-    elif a.kind == "scaling":
-        sweep(a.paths, a.out, r"gpt_(tiny|small|medium)_", "bpc", "model size",
-              "Mini-GPT: validation bits per character vs model size", False)
     else:
         ptq(a.paths, a.out)
 
