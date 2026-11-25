@@ -116,13 +116,17 @@ def summarize(rows, out_dir):
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.5))
     colors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#6250d6"]
     width = 0.8 / len(rots)
+    def sqnr(n, r):
+        return -10 * math.log10(np.mean([float(x["nmse"]) for x in rows
+                                         if x["format"] == n and int(x["rotation"]) == r]))
+    base = sqnr("nvfp4", 0) if "nvfp4" in names else 0.0
     for j, r in enumerate(rots):
-        vals = [-10 * math.log10(np.mean([float(x["nmse"]) for x in rows
-                                          if x["format"] == n and int(x["rotation"]) == r])) for n in names]
+        vals = [sqnr(n, r) - base for n in names]
         a1.bar(np.arange(len(names)) + j * width, vals, width, label=f"rotation {r or 'none'}",
                color=["#2a78d6", "#eb6834", "#1baf7a"][j % 3])
+    a1.axhline(0, color="#222222", linewidth=0.8)
     a1.set(xticks=np.arange(len(names)) + width * (len(rots) - 1) / 2, xticklabels=names,
-           ylabel="SQNR (dB, higher is better)", title="Mean quantization quality per format")
+           ylabel="SQNR vs NVFP4 without rotation (dB)", title="Quantization quality per format (higher is better)")
     a1.legend(frameon=False, fontsize=8)
     for i, n in enumerate(names):
         pts = [x for x in rows if x["format"] == n and int(x["rotation"]) == 0]
