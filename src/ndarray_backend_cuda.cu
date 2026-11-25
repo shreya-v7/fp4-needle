@@ -697,18 +697,26 @@ void Nvfp4Dequantize(const CudaByteArray& packed, const CudaByteArray& scales, f
 
 __global__ void Nvfp4GemvKernel(const uint8_t* packed, const uint8_t* scales, float ts,
                                 const scalar_t* x, scalar_t* y, size_t rows, size_t cols,
-                                size_t cols_pad) {
+                                size_t cols_pad, bool x_vec4) {
   /**
    * y = W x, one warp per output row. Lane l reads blocks l, l+32, ...: each
    * block is 8 bytes of codes (one 64-bit load; neighbouring lanes read
    * neighbouring 8-byte chunks, so a warp reads 256 contiguous bytes at once)
-   * plus one scale byte. Codes are turned into values with a 16-entry table in
-   * shared memory, products are accumulated in FP32, and the 32 lane sums are
-   * combined with a __shfl_xor_sync butterfly. Same order as the CPU version.
+   * plus one scale byte. Codes and scale bytes are turned into values with
+   * tables in shared memory (16 E2M1 values, 256 E4M3 values), products are
+   * accumulated in FP32, and the 32 lane sums are combined with a
+   * __shfl_xor_sync butterfly. Same order as the CPU version.
+   *
+   * Speed: when x_vec4 (no padding and x 16-byte aligned) the block's 16 x
+   * values come in four float4 loads instead of 16 checked scalar loads, and
+   * the loop is unrolled by 2 so two blocks' partial sums are computed at the
+   * same time. Neither changes the order of any addition.
    */
   using namespace nvfp4;
-  __shared__ float table[16];
-  if (threadIdx.x < 16) table[threadIdx.x] = e2m1_value(threadIdx.x);
+  __shared__ float e2m1[16];
+  __shared__ float e4m3[256];
+  for (int i = threadIdx.x; i < 256; i += blockDim.x) e4m3[i] = decode_e4m3(i);
+  if (threadIdx.x < 16) e2m1[threadIdx.x] = e2m1_value(threadIdx.x);
   __syncthreads();
 
   size_t row = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
@@ -718,17 +726,27 @@ __global__ void Nvfp4GemvKernel(const uint8_t* packed, const uint8_t* scales, fl
   size_t num_blocks = cols_pad / BLOCK;
   const uint8_t* row_codes = packed + row * (cols_pad / 2);
   float acc = 0.0f;
+#pragma unroll 2
   for (size_t b = lane; b < num_blocks; b += WARP_SIZE) {
-    uint2 bytes8 = *reinterpret_cast<const uint2*>(row_codes + b * 8);  // 16 codes
-    float scale = mul_rn(decode_e4m3(scales[row * num_blocks + b]), ts);
+    uint2 bytes8 = __ldg(reinterpret_cast<const uint2*>(row_codes + b * 8));  // 16 codes
+    float scale = mul_rn(e4m3[__ldg(scales + row * num_blocks + b)], ts);
+    float xs[BLOCK];
+    if (x_vec4) {
+      const float4* x4 = reinterpret_cast<const float4*>(x + b * BLOCK);
+      for (int q = 0; q < 4; q++) {
+        float4 t = __ldg(x4 + q);
+        xs[4 * q] = t.x; xs[4 * q + 1] = t.y; xs[4 * q + 2] = t.z; xs[4 * q + 3] = t.w;
+      }
+    } else {
+      for (int j = 0; j < BLOCK; j++) xs[j] = b * BLOCK + j < cols ? x[b * BLOCK + j] : 0.0f;
+    }
     float s = 0.0f;
+#pragma unroll
     for (int k = 0; k < 8; k++) {
       uint32_t word = k < 4 ? bytes8.x : bytes8.y;
       uint32_t byte = (word >> (8 * (k % 4))) & 0xFF;     // little-endian: byte k
-      size_t c = b * BLOCK + 2 * k;
-      float x0 = c < cols ? x[c] : 0.0f, x1 = c + 1 < cols ? x[c + 1] : 0.0f;
-      s = add_rn(s, mul_rn(table[byte & 0xF], x0));       // element 2k (low nibble)
-      s = add_rn(s, mul_rn(table[byte >> 4], x1));        // element 2k+1 (high nibble)
+      s = add_rn(s, mul_rn(e2m1[byte & 0xF], xs[2 * k]));     // element 2k (low nibble)
+      s = add_rn(s, mul_rn(e2m1[byte >> 4], xs[2 * k + 1]));  // element 2k+1 (high nibble)
     }
     acc = add_rn(acc, mul_rn(s, scale));
   }
@@ -767,8 +785,9 @@ static dim3 GemvGrid(size_t rows) {
 
 void Nvfp4Gemv(const CudaByteArray& packed, const CudaByteArray& scales, float ts,
                const CudaArray& x, CudaArray* y, size_t rows, size_t cols) {
+  bool x_vec4 = cols % nvfp4::BLOCK == 0 && reinterpret_cast<uintptr_t>(x.ptr) % 16 == 0;
   Nvfp4GemvKernel<<<GemvGrid(rows), BASE_THREAD_NUM>>>(packed.ptr, scales.ptr, ts, x.ptr, y->ptr,
-                                                       rows, cols, nvfp4::padded_cols(cols));
+                                                       rows, cols, nvfp4::padded_cols(cols), x_vec4);
   CUDA_CHECK_LAUNCH();
 }
 

@@ -1,0 +1,9 @@
+config,seed,step,ratio
+fprop+dgrad+wgrad+switch39,0,0,7.0633
+fprop+dgrad+wgrad+switch39,0,10,6.2229
+fprop+dgrad+wgrad+switch39,0,20,6.0917
+fprop+dgrad+wgrad+switch39,0,30,6.7559
+fprop+dgrad+wgrad+switch39,0,40,inf
+fprop+dgrad+wgrad+switch39,0,50,inf
+fprop+dgrad+wgrad+switch39,0,60,inf
+fprop+dgrad+wgrad+switch39,0,70,inf
