@@ -250,6 +250,7 @@ void EwiseTanh(const AlignedArray& a, AlignedArray* out) {
     }
 }
 
+// AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 // Added for FP4 quantization: floor and absolute value, used to round
 // block scales to FP8 E4M3 (see python/needle/fp4/quantize.py).
 void EwiseFloor(const AlignedArray& a, AlignedArray* out) {
@@ -451,6 +452,7 @@ void ReduceSum(const AlignedArray& a, AlignedArray* out, size_t reduce_size) {
 
 ////////////////////////////////////////////////////////////////////////////////
 // NVFP4 (Stage 4): packed 4-bit storage, quantize+pack, dequantize, GEMV
+// AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 //
 // A matrix W of shape (rows, cols) is stored blocked along `cols` (each row's
 // reduction axis for y = W x):

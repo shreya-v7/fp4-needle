@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Plot Stage 3 results written by apps/fp4_experiment.py.
 
     python3 apps/plot_fp4.py results/mnist_seed*.csv --out-dir results

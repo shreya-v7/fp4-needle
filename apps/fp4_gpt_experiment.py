@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Character-level GPT (decoder-only Transformer) trained with FP4 matmuls.
 
 Data: text8 (first 100M characters of Wikipedia, 27 symbols), or any text file.
@@ -47,7 +48,8 @@ class MiniGPT(nn.Module):
         self.transformer = nn.Transformer(d_model, 4 * d_model, layers, num_head=heads,
                                           dim_head=d_model // heads, causal=True,
                                           sequence_len=seq_len, device=device, config=config)
-        self.head = nn.QuantizedLinear(d_model, vocab, device=device, config=config)
+        self.head = (nn.Linear(d_model, vocab, device=device) if config is None
+                     else nn.QuantizedLinear(d_model, vocab, device=device, config=config))
 
     def forward(self, x):
         seq_len, batch = x.shape
@@ -148,7 +150,7 @@ def main():
     p.add_argument("--data-file", default="data/text8")
     p.add_argument("--max-chars", type=int, default=5_000_000, help="0 = whole file")
     p.add_argument("--size", choices=SIZES, default="small")
-    p.add_argument("--seq-len", type=int, default=64)
+    p.add_argument("--seq-len", type=int, default=32)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--eval-every", type=int, default=250)

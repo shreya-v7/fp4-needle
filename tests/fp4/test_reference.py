@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Tests for the NumPy NVFP4 reference quantizer (python/needle/fp4/reference.py).
 
 Run from the repo root:  python3 -m pytest tests/fp4/test_reference.py -v

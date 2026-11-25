@@ -172,7 +172,8 @@ class LSTMCell(Module):
 
         Weights and biases are initialized from U(-sqrt(k), sqrt(k)) where k = 1/hidden_size
 
-        config (FP4 project addition): an optional needle.fp4.QuantConfig. If given,
+        config (FP4 project addition, AI-assisted with Claude, reviewed by the team): an optional
+        needle.fp4.QuantConfig. If given,
         the two gate matmuls run through ops.fp4_matmul, exactly like
         nn.QuantizedLinear; None (the default) keeps the original FP32 behaviour.
         """

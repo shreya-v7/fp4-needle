@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Plug-in 4-bit block formats (NumPy reference) for the storage study.
 
 Each format quantizes a 2-D array in blocks along its last axis and returns the
@@ -100,16 +101,17 @@ class Rotation:
 
     def __init__(self, cols, size, seed=0):
         assert size & (size - 1) == 0, "rotation size must be a power of two"
-        self.size, self.h = size, hadamard(size)
+        self.cols, self.size, self.h = cols, size, hadamard(size)
         self.signs = np.random.default_rng(seed).choice([-1.0, 1.0], cols).astype(np.float32)
 
     def forward(self, w):
-        b, pad = _blocks(w * self.signs, self.size)
-        return _unblocks(b @ self.h, pad)
+        """Returns the rotated array padded to a multiple of `size` (padding is mixed in)."""
+        b, _ = _blocks(w * self.signs, self.size)
+        return (b @ self.h).reshape(w.shape[0], -1)
 
     def inverse(self, w):
-        b, pad = _blocks(w, self.size)
-        return _unblocks(b @ self.h.T, pad) * self.signs
+        b, _ = _blocks(w, self.size)
+        return (b @ self.h.T).reshape(w.shape[0], -1)[:, : self.cols] * self.signs
 
 
 def quantize_rotated(w, fmt, rot_size, seed=0):

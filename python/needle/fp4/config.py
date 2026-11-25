@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Which of a linear layer's three training matmuls run in FP4.
 
 For Y = X @ W with X: (batch, in) and W: (in, out):

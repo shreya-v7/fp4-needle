@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """LSTM language model on Penn Treebank with FP4 matmuls (the TA's "LSTM with SR").
 
 Same idea as apps/fp4_experiment.py (MNIST MLP), on a recurrent model: every

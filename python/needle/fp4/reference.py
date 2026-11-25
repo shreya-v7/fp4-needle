@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """NumPy reference implementation of NVFP4 quantization.
 
 This file is the "ground truth" for the project: the needle fake-quant Op

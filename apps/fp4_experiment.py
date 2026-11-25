@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Stage 3 experiment runner: train an MLP on MNIST with FP4 linear layers.
 
 Each run trains the same MLP (same seed, same data order) with a different

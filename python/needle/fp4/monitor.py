@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Gradient-to-noise ratio for FP4 training (the sqrt(3) threshold of Chmiel et al., 2025).
 
     r = ||g|| / ||g_q - g||

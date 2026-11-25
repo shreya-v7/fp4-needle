@@ -531,6 +531,7 @@ class NDArray:
         self.device.ewise_tanh(self.compact()._handle, out._handle)
         return out
 
+    # AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
     # Added for FP4 quantization (python/needle/fp4/quantize.py).
     def floor(self):
         out = NDArray.make(self.shape, device=self.device)

@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Real 4-bit storage: an NVFP4 matrix packed in device memory (Stage 4).
 
 Fake quantization (quantize.py) keeps every value in float32, so it can only

@@ -18,6 +18,7 @@ from .nn_fp4 import QuantizedLinear
 
 
 def _linear(in_features, out_features, config, **kwargs):
+    # AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
     # FP4 project addition: config=None keeps the original nn.Linear.
     if config is None:
         return Linear(in_features, out_features, **kwargs)

@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Tests for Stage 4: packed NVFP4 storage and the quantize+pack / dequantize /
 GEMV kernels, on the cpu backend and (when built) the cuda backend.
 

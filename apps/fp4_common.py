@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Shared helpers for the experiment runners: named parameters, checkpoints, safetensors."""
 import json
 import os

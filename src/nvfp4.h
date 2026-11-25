@@ -1,3 +1,4 @@
+// AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 // NVFP4 arithmetic shared by the CPU backend (ndarray_backend_cpu.cc) and the
 // CUDA backend (ndarray_backend_cuda.cu).
 //

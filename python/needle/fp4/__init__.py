@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """FP4 (NVFP4) quantization for needle.
 
 Modules:
