@@ -22,11 +22,22 @@ class QuantConfig:
             round-to-nearest, as in NVIDIA's NVFP4 training recipe: SR removes
             the bias that round-to-nearest adds to gradients, while SR on
             forward-pass tensors would only add noise.
+        weights: how W is quantized for the two matmuls that use it.
+            "1d": independently in each, blocks of 16 along its reduction axis,
+                  so Fprop and Dgrad see slightly different weights (default);
+            "2d": one scale per 16 x 16 tile, so both see the same weight
+                  (NVIDIA's NVFP4 recipe);
+            "sr": Dgrad re-quantizes the forward weight with stochastic
+                  rounding, equal to it in expectation (Thinking Machines' recipe).
     """
     fprop: bool = False
     dgrad: bool = False
     wgrad: bool = False
     stochastic: bool = False
+    weights: str = "1d"
+
+    def __post_init__(self):
+        assert self.weights in ("1d", "2d", "sr"), f"unknown weights mode {self.weights!r}"
 
     @property
     def name(self) -> str:
@@ -34,7 +45,8 @@ class QuantConfig:
         parts = [p for p, on in (("fprop", self.fprop), ("dgrad", self.dgrad),
                                  ("wgrad", self.wgrad)) if on]
         label = "+".join(parts) if parts else "fp32"
-        return label + ("+sr" if self.stochastic else "")
+        label += "+sr" if self.stochastic else ""
+        return label + ("" if self.weights == "1d" else f"+w{self.weights}")
 
 
 # The configurations from the project plan.

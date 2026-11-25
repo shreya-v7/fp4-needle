@@ -59,7 +59,12 @@ ABLATION = [
     QuantConfig(wgrad=True, stochastic=True),
 ]
 
-CONFIG_SETS = {"grid": GRID, "ablation": ABLATION, "all": GRID + ABLATION}
+# All three matmuls in FP4, with W quantized consistently for Fprop and Dgrad:
+# one scale per 16x16 tile (NVIDIA) or SR re-quantization of the forward W (Thinking Machines).
+WEIGHTS = [QuantConfig(fprop=True, dgrad=True, wgrad=True, stochastic=sr, weights=w)
+           for sr in (False, True) for w in ("2d", "sr")]
+
+CONFIG_SETS = {"grid": GRID, "ablation": ABLATION, "weights": WEIGHTS, "all": GRID + ABLATION}
 
 CSV_FIELDS = ["config", "seed", "split", "epoch", "step", "loss", "accuracy", "elapsed_s"]
 

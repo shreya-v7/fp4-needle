@@ -6,6 +6,7 @@
 Writes, averaging over every seed found in the CSVs:
     mnist_grid.png       train loss and test accuracy for the project grid
     mnist_ablation.png   the same for single-matmul ablations (vs FP32)
+    mnist_weights.png    consistent weight quantization (only if those configs were run)
     summary.md           a table of final numbers per config (the chart's table view)
 """
 import argparse
@@ -31,12 +32,19 @@ FAMILY_COLORS = {
 }
 GRID = ["fp32", "fprop", "fprop+dgrad", "fprop+dgrad+sr", "fprop+dgrad+wgrad", "fprop+dgrad+wgrad+sr"]
 ABLATION = ["fp32", "dgrad", "dgrad+sr", "wgrad", "wgrad+sr"]
+# How W is quantized for Fprop and Dgrad (QuantConfig.weights), with all three matmuls in FP4.
+WEIGHTS = ["fp32", "fprop+dgrad+wgrad", "fprop+dgrad+wgrad+w2d", "fprop+dgrad+wgrad+wsr",
+           "fprop+dgrad+wgrad+sr", "fprop+dgrad+wgrad+sr+w2d", "fprop+dgrad+wgrad+sr+wsr"]
+WEIGHT_COLORS = {"+w2d": "#1baf7a", "+wsr": "#6250d6"}   # aqua: 16x16 tiles, violet: SR re-quantized
 
 
 def style(config):
-    family = config[:-3] if config.endswith("+sr") else config
-    color = FAMILY_COLORS.get(family, "#7f7f7f")   # gray for configs we have no color for
-    return dict(color=color, linestyle="--" if config.endswith("+sr") else "-", linewidth=2)
+    weights = next((w for w in WEIGHT_COLORS if config.endswith(w)), "")
+    base = config[: len(config) - len(weights)]
+    sr = base.endswith("+sr")
+    family = base[:-3] if sr else base
+    color = WEIGHT_COLORS.get(weights) or FAMILY_COLORS.get(family, "#7f7f7f")
+    return dict(color=color, linestyle="--" if sr else "-", linewidth=2)
 
 
 def load(paths):
@@ -139,7 +147,8 @@ def summary(rows, path):
     lines = ["| config | seeds | final test acc (%) | final test loss | "
              "train loss, last 100 steps | s per run |",
              "|---|---|---|---|---|---|"]
-    for c in [c for c in GRID + ABLATION[1:] if c in rows]:
+    known = GRID + ABLATION[1:] + WEIGHTS[1:]
+    for c in [c for c in dict.fromkeys(known) if c in rows] + sorted(c for c in rows if c not in known):
         seeds = list(rows[c].values())
         acc = [s["test"][-1][2] * 100 for s in seeds if s["test"]]
         tl = [s["test"][-1][1] for s in seeds if s["test"]]
@@ -208,6 +217,9 @@ def main():
          os.path.join(args.out_dir, f"{args.prefix}_grid.png"))
     plot(rows, ABLATION, f"{args.title}: one backward matmul in FP4",
          os.path.join(args.out_dir, f"{args.prefix}_ablation.png"))
+    if any("+w" in c for c in rows):
+        plot(rows, WEIGHTS, f"{args.title}: how W is quantized for Fprop and Dgrad",
+             os.path.join(args.out_dir, f"{args.prefix}_weights.png"))
     summary(rows, os.path.join(args.out_dir, "summary.md"))
 
 

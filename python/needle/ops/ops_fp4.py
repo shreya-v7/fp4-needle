@@ -3,7 +3,7 @@
 
 from ..autograd import Tensor, TensorOp
 from ..fp4.config import QuantConfig
-from ..fp4.quantize import fake_quant
+from ..fp4.quantize import fake_quant, fake_quant_2d
 
 
 class FP4Matmul(TensorOp):
@@ -16,7 +16,8 @@ class FP4Matmul(TensorOp):
     matmul hardware.
 
     Each matmul blocks its operands along *its own* reduction axis, so W is
-    quantized along `in` for Fprop but along `out` for Dgrad (see config.py).
+    quantized along `in` for Fprop but along `out` for Dgrad, unless
+    config.weights asks for a consistent weight (see config.py).
 
     Backward uses the straight-through estimator: quantization is treated as
     the identity, so gradients are computed from the unquantized X and W unless
@@ -29,7 +30,7 @@ class FP4Matmul(TensorOp):
     def compute(self, X, W):
         if self.config.fprop:
             X = fake_quant(X, axis=1)   # reduce over `in` = axis 1 of X
-            W = fake_quant(W, axis=0)   # ... and axis 0 of W
+            W = fake_quant_2d(W) if self.config.weights == "2d" else fake_quant(W, axis=0)
         return X @ W
 
     def gradient(self, out_grad, node):
@@ -41,7 +42,13 @@ class FP4Matmul(TensorOp):
         # (When SR is on, its random numbers are drawn here first, then in Wgrad.)
         if cfg.dgrad:
             dY_q = fake_quant(dY, axis=1, stochastic=cfg.stochastic)
-            W_q = fake_quant(W, axis=1)
+            if cfg.weights == "2d":     # the same tiles as in Fprop
+                W_q = fake_quant_2d(W)
+            elif cfg.weights == "sr":   # the forward weight, re-quantized along `out` with SR
+                W_fwd = fake_quant(W, axis=0) if cfg.fprop else W
+                W_q = fake_quant(W_fwd, axis=1, stochastic=True)
+            else:
+                W_q = fake_quant(W, axis=1)
             dX = dY_q @ W_q.permute((1, 0))
         else:
             dX = dY @ W.permute((1, 0))

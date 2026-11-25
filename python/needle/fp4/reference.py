@@ -314,6 +314,28 @@ def fake_quant(x: np.ndarray, axis: int = -1, stochastic: bool = False,
     return dequantize(quantize_nvfp4(x, axis, stochastic, rand, rng))
 
 
+def fake_quant_2d(x: np.ndarray) -> np.ndarray:
+    """NVFP4 fake quantization of a 2-D weight with one E4M3 scale per 16 x 16 tile.
+
+    NVIDIA's 2D weight scaling: since each scale covers a square tile, quantizing
+    along rows (forward matmul) or columns (backward matmul) gives the same
+    result, so both passes use one consistent quantized weight. Round to nearest.
+    """
+    x = np.asarray(x, dtype=np.float32)
+    rows, cols = x.shape
+    bs = NVFP4_BLOCK_SIZE
+    p = np.pad(x, ((0, -rows % bs), (0, -cols % bs)))
+    R, C = p.shape[0] // bs, p.shape[1] // bs
+    tiles = p.reshape(R, bs, C, bs).transpose(0, 2, 1, 3).reshape(R, C, bs * bs)
+    tensor_scale = compute_tensor_scale(x)
+    block_scales = round_to_e4m3((np.max(np.abs(tiles), axis=-1) / FP4_MAX) / tensor_scale)
+    scale = (block_scales * tensor_scale)[..., None]
+    has_scale = scale > 0
+    scaled = np.where(has_scale, tiles / np.where(has_scale, scale, 1), 0).astype(np.float32)
+    q = (e2m1_decode(e2m1_encode(scaled)) * scale).astype(np.float32)
+    return q.reshape(R, C, bs, bs).transpose(0, 2, 1, 3).reshape(p.shape)[:rows, :cols]
+
+
 # ----------------------------------------------------------------------------
 # NVFP4 matrix-vector product (the reference for the Stage 4 GEMV kernels)
 # ----------------------------------------------------------------------------
