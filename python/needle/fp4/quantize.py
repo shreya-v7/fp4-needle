@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """NVFP4 fake quantization on needle NDArrays (runs on any needle device).
 
 This is the needle version of `reference.fake_quant`. It uses only NDArray

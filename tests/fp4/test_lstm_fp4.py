@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Tests for the FP4 option of needle's LSTM (config=QuantConfig(...)).
 
     python3 -m pytest tests/fp4/test_lstm_fp4.py -v

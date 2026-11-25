@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Stage 4 benchmark: FP32 GEMV vs NVFP4 GEMV (y = W x), the core operation of
 text generation at batch size 1.
 

@@ -105,6 +105,7 @@ def ewise_tanh(a, out):
     out.array[:] = np.tanh(a.array)
 
 
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 # Added for FP4 quantization (python/needle/fp4/quantize.py).
 def ewise_floor(a, out):
     out.array[:] = np.floor(a.array)

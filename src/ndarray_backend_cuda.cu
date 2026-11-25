@@ -372,6 +372,7 @@ UNARY_OP(EwiseLog, logf(x))
 UNARY_OP(EwiseExp, expf(x))
 UNARY_OP(EwiseTanh, tanhf(x))
 
+// AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 // Added for FP4 quantization (see python/needle/fp4/quantize.py).
 UNARY_OP(EwiseFloor, floorf(x))
 UNARY_OP(EwiseAbs, fabsf(x))
@@ -562,6 +563,7 @@ void ReduceSum(const CudaArray& a, CudaArray* out, size_t reduce_size) {
 
 ////////////////////////////////////////////////////////////////////////////////
 // NVFP4 (Stage 4): packed 4-bit storage, quantize+pack, dequantize, GEMV
+// AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 //
 // Same storage layout and arithmetic as the CPU versions in
 // ndarray_backend_cpu.cc (read those first: they are the step-by-step

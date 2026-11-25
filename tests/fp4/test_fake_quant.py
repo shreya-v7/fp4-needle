@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Tests for Stage 2: needle fake quantization, the FP4Matmul Op, and nn.QuantizedLinear.
 
 Every needle result is compared with the NumPy reference (tests/fp4/test_reference.py

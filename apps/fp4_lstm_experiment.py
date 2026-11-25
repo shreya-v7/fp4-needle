@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """LSTM language model on Penn Treebank with FP4 matmuls (the TA's "LSTM with SR").
 
 Same idea as apps/fp4_experiment.py (MNIST MLP), on a recurrent model: every
@@ -21,12 +22,15 @@ import sys
 import time
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "python"))
+sys.path.append(os.path.dirname(__file__))
 
 import numpy as np
 
 import needle as ndl
 import needle.nn as nn
 from needle.fp4.config import QuantConfig
+from needle.fp4 import monitor
+from fp4_common import save_checkpoint
 
 CONFIGS = {
     "grid": [QuantConfig(),
@@ -60,7 +64,7 @@ class FP4LanguageModel(nn.Module):
         return self.linear(out.reshape((seq_len * batch_size, self.hidden_size))), h
 
 
-def run_epoch(model, data, args, device, opt=None, on_step=None):
+def run_epoch(model, data, args, device, opt=None, on_step=None, before_step=None):
     """One pass over `data` (nbatch, batch_size) with truncated backprop through time.
     Returns (average loss, next-word accuracy)."""
     model.train() if opt is not None else model.eval()
@@ -68,6 +72,8 @@ def run_epoch(model, data, args, device, opt=None, on_step=None):
     h, total_loss, total_correct, n = None, 0.0, 0, 0
     for i in range(0, data.shape[0] - 1, args.seq_len):
         X, y = ndl.data.get_batch(data, i, args.seq_len, device=device, dtype="float32")
+        if before_step is not None:
+            before_step(lambda: loss_fn(model(X, h)[0], y))
         logits, h = model(X, h)
         loss = loss_fn(logits, y)
         h = tuple(t.detach() for t in h)        # stop gradients at the chunk boundary
@@ -87,12 +93,22 @@ def run_epoch(model, data, args, device, opt=None, on_step=None):
     return total_loss / n, total_correct / n
 
 
-def train_one(config, corpus, args, device, writer):
+def ptq_target(meta, device):
+    corpus = ndl.data.Corpus(meta["data_dir"], max_lines=meta["max_lines"] or None)
+    model = FP4LanguageModel(len(corpus.dictionary), meta["embedding"], meta["hidden"],
+                             meta["layers"], QuantConfig(), device)
+    test = ndl.data.batchify(corpus.test, meta["batch_size"], device=device, dtype="float32")
+    args = argparse.Namespace(seq_len=meta["seq_len"], clip=0)
+    return model, lambda m: {"test_ppl": float(np.exp(run_epoch(m, test, args, device)[0]))}
+
+
+def train_one(config, corpus, args, device, writer, gnr_writer=None):
     # Same seed for every config: same initial weights; the data order is fixed
     # (PTB is read in order), so runs differ only by FP4.
     np.random.seed(args.seed)
     vocab = len(corpus.dictionary)
     model = FP4LanguageModel(vocab, args.embedding, args.hidden, args.layers, config, device)
+    name = config.name + (f"+switch{args.switch_step}" if args.switch_step else "")
     opt = (ndl.optim.Adam(model.parameters(), lr=args.lr) if args.optimizer == "adam"
            else ndl.optim.SGD(model.parameters(), lr=args.lr))
     train = ndl.data.batchify(corpus.train, args.batch_size, device=device, dtype="float32")
@@ -100,22 +116,35 @@ def train_one(config, corpus, args, device, writer):
     start, step = time.time(), [0]
 
     def log(split, epoch, loss, acc):
-        writer.writerow({"config": config.name, "seed": args.seed, "split": split, "epoch": epoch,
+        writer.writerow({"config": name, "seed": args.seed, "split": split, "epoch": epoch,
                          "step": step[0], "loss": f"{loss:.6f}", "accuracy": f"{acc:.4f}",
                          "elapsed_s": f"{time.time() - start:.1f}"})
+
+    def before_step(loss_fn):
+        if args.switch_step and step[0] == args.switch_step:
+            monitor.set_config(model, monitor.exact_backward)
+        if gnr_writer and step[0] % args.monitor_every == 0:
+            r = monitor.grad_noise_ratio(model, loss_fn)
+            gnr_writer.writerow({"config": name, "seed": args.seed, "step": step[0], "ratio": f"{r:.5g}"})
 
     for epoch in range(1, args.epochs + 1):
         def on_step(loss, acc):
             step[0] += 1
             log("train", epoch, loss, acc)
-        train_loss, _ = run_epoch(model, train, args, device, opt=opt, on_step=on_step)
+        train_loss, _ = run_epoch(model, train, args, device, opt=opt, on_step=on_step,
+                                  before_step=before_step)
         if not np.isfinite(train_loss):
             print(f"  {config.name}: loss became {train_loss}; stopping run")
             return
         test_loss, test_acc = run_epoch(model, test, args, device)
         log("test", epoch, test_loss, test_acc)
-        print(f"  {config.name:24s} epoch {epoch}: train ppl {np.exp(train_loss):8.1f}  "
+        print(f"  {name:24s} epoch {epoch}: train ppl {np.exp(train_loss):8.1f}  "
               f"test ppl {np.exp(test_loss):8.1f}  ({time.time() - start:.0f}s)", flush=True)
+    if args.save_weights:
+        save_checkpoint(model, args.save_weights.format(config=name, seed=args.seed),
+                        {"runner": "lstm", "data_dir": args.data_dir, "max_lines": args.max_lines,
+                         "embedding": args.embedding, "hidden": args.hidden, "layers": args.layers,
+                         "batch_size": args.batch_size, "seq_len": args.seq_len, "config": name})
 
 
 def main():
@@ -126,7 +155,7 @@ def main():
     parser.add_argument("--data-dir", default="data/ptb")
     parser.add_argument("--out", default="results/lstm_seed0.csv")
     parser.add_argument("--max-lines", type=int, default=2000,
-                        help="lines of train.txt / test.txt to use (PTB has 42068 / 3761)")
+                        help="lines of train.txt / test.txt to use (0 = all; PTB has 42068 / 3761)")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--seq-len", type=int, default=20)
@@ -137,12 +166,15 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--clip", type=float, default=0.0, help="max gradient norm (0 = off)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--save-weights", default="", help="checkpoint path, may use {config} and {seed}")
+    parser.add_argument("--monitor-every", type=int, default=0)
+    parser.add_argument("--switch-step", type=int, default=0)
     args = parser.parse_args()
 
     device = getattr(ndl, args.device)()
     if not device.enabled():
         parser.error(f"needle's {args.device} backend is not built (Colab: use a GPU runtime)")
-    corpus = ndl.data.Corpus(args.data_dir, max_lines=args.max_lines)
+    corpus = ndl.data.Corpus(args.data_dir, max_lines=args.max_lines or None)
     configs = CONFIGS[args.configs]
     if args.only:
         configs = [c for c in configs if c.name in args.only]
@@ -150,12 +182,20 @@ def main():
           f"vocabulary {len(corpus.dictionary)}; training {[c.name for c in configs]} on {device}")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    gnr_file = open(args.out.replace(".csv", "_gnr.csv"), "w", newline="") if args.monitor_every else None
+    gnr_writer = csv.DictWriter(gnr_file, fieldnames=["config", "seed", "step", "ratio"]) if gnr_file else None
+    if gnr_writer:
+        gnr_writer.writeheader()
     with open(args.out, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         writer.writeheader()
         for config in configs:
-            train_one(config, corpus, args, device, writer)
+            train_one(config, corpus, args, device, writer, gnr_writer)
             f.flush()
+            if gnr_file:
+                gnr_file.flush()
+    if gnr_file:
+        gnr_file.close()
     print("wrote", args.out)
 
 

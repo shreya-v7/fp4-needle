@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 # Checks every pull request into main, and every commit that lands on main.
 name: CI
 

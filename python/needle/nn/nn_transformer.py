@@ -14,6 +14,15 @@ from .nn_basic import (
     Linear,
     Sequential
 )
+from .nn_fp4 import QuantizedLinear
+
+
+def _linear(in_features, out_features, config, **kwargs):
+    # AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
+    # FP4 project addition: config=None keeps the original nn.Linear.
+    if config is None:
+        return Linear(in_features, out_features, **kwargs)
+    return QuantizedLinear(in_features, out_features, config=config, **kwargs)
 
 
 class MultiHeadAttention(Module):
@@ -138,6 +147,7 @@ class AttentionLayer(Module):
         causal = True,
         device = None,
         dtype = "float32",
+        config = None,
     ):
 
         super().__init__()
@@ -169,22 +179,22 @@ class AttentionLayer(Module):
 
         inner_dim = num_head * dim_head
         
-        self.q_projection = Linear(
-            q_features, inner_dim, bias=False,
+        self.q_projection = _linear(
+            q_features, inner_dim, config, bias=False,
             device=device, dtype=dtype)
-        self.k_projection = Linear(
-            k_features, inner_dim, bias=False,
+        self.k_projection = _linear(
+            k_features, inner_dim, config, bias=False,
             device=device, dtype=dtype)
-        self.v_projection = Linear(
-            v_features, inner_dim, bias=False,
+        self.v_projection = _linear(
+            v_features, inner_dim, config, bias=False,
             device=device, dtype=dtype)
 
         self.attn = MultiHeadAttention(
             dropout=dropout, causal=causal,
             device=device, dtype=dtype)
 
-        self.out_projection = Linear(
-            inner_dim, out_features, bias=False,
+        self.out_projection = _linear(
+            inner_dim, out_features, config, bias=False,
             device=device, dtype=dtype)
 
     def forward(
@@ -241,6 +251,7 @@ class TransformerLayer(Module):
         causal = True,
         device = None,
         dtype = "float32",
+        config = None,
     ):
 
         super().__init__()
@@ -257,11 +268,12 @@ class TransformerLayer(Module):
             causal=causal,
             device=device,
             dtype=dtype,
+            config=config,
         )
         self.dropout = Dropout(dropout)
         self.layernorm = LayerNorm1d(q_features, device=device, dtype=dtype)
-        self.linear1 = Linear(q_features, hidden_size, device=device, dtype=dtype)
-        self.linear2 = Linear(hidden_size, q_features, device=device, dtype=dtype)
+        self.linear1 = _linear(q_features, hidden_size, config, device=device, dtype=dtype)
+        self.linear2 = _linear(hidden_size, q_features, config, device=device, dtype=dtype)
         self.relu = ReLU()
         ### END YOUR SOLUTION
 
@@ -305,7 +317,8 @@ class Transformer(Module):
         device = None,
         dtype = "float32",
         batch_first = False,
-        sequence_len = 2048
+        sequence_len = 2048,
+        config = None,
     ):
 
         super().__init__()
@@ -327,6 +340,7 @@ class Transformer(Module):
                 causal=causal,
                 device=device,
                 dtype=dtype,
+                config=config,
             )
             for _ in range(num_layers)
         ])

@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Inference with real 4-bit weights: memory, accuracy and batch-1 latency.
 
 The training experiments use fake quantization, which saves nothing. Here the

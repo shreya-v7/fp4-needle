@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Experiment: how much error does each FP4 matmul put into the gradients?
 
 Training curves on MNIST are noisy and saturate quickly, so this measures the

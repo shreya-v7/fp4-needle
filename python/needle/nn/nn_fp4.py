@@ -1,3 +1,4 @@
+# AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """nn.QuantizedLinear: a drop-in replacement for nn.Linear that trains in FP4."""
 
 from needle import ops

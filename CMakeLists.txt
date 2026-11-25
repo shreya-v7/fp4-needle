@@ -17,6 +17,7 @@ find_package(pybind11 PATHS ${__pybind_path})
 
 
 if(NOT MSVC)
+  # AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
   # -ffp-contract=off: never fuse a*b+c into one FMA, so the NVFP4 kernels round
   # exactly like the NumPy reference (see src/nvfp4.h).
   set(CMAKE_CXX_FLAGS "-std=c++11 -O2 -march=native -ffp-contract=off ${CMAKE_CXX_FLAGS}")
