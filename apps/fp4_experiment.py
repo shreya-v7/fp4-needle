@@ -1,5 +1,5 @@
 # AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
-"""Stage 3 experiment runner: train an MLP on MNIST with FP4 linear layers.
+"""Stage 3 experiment runner: train an MLP on MNIST or CIFAR-10 with FP4 linear layers.
 
 Each run trains the same MLP (same seed, same data order) with a different
 QuantConfig and logs to one CSV file:
@@ -11,6 +11,8 @@ Examples (from the repo root):
     python3 apps/fp4_experiment.py --configs grid --device cpu --epochs 1 --train-subset 20000
     # every config incl. single-matmul ablations, full data, on a GPU
     python3 apps/fp4_experiment.py --configs all --device cuda --epochs 3
+    # the same on CIFAR-10
+    python3 apps/fp4_experiment.py --dataset cifar10 --configs all --device cuda --epochs 3
     # then plot
     python3 apps/plot_fp4.py results/mnist.csv
 
@@ -31,7 +33,6 @@ import numpy as np
 import needle as ndl
 import needle.nn as nn
 from needle.fp4.config import QuantConfig
-from needle.fp4 import monitor
 from fp4_common import save_checkpoint
 
 # ----------------------------------------------------------------------------
@@ -137,15 +138,14 @@ def evaluate(model, dataset, device, batch_size=1000):
 # Training
 # ----------------------------------------------------------------------------
 
-def train_one(config, args, train_set, test_set, device, writer, gnr_writer=None):
+def train_one(config, args, train_set, test_set, device, writer):
     """Train one config from scratch and stream its metrics to the CSV writer."""
     # Same seed for every config: identical initial weights and data order, so
     # differences between runs come only from FP4.
     np.random.seed(args.seed)
     model = make_mlp(config, args.hidden, device, DATASETS[args.dataset][1])
-    name = config.name + (f"+switch{args.switch_step}" if args.switch_step else "")
-    optimizer = (ndl.optim.Adam(model.parameters(), lr=args.lr) if args.optimizer == "adam"
-                 else ndl.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9))
+    name = config.name
+    optimizer = ndl.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
     loss_fn = nn.SoftmaxLoss()
     start = time.time()
 
@@ -162,11 +162,6 @@ def train_one(config, args, train_set, test_set, device, writer, gnr_writer=None
         loader = ndl.data.DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
         for batch in loader:
             X, y = to_device(batch, device)
-            if args.switch_step and step == args.switch_step:
-                monitor.set_config(model, monitor.exact_backward)
-            if gnr_writer and step % args.monitor_every == 0:
-                r = monitor.grad_noise_ratio(model, lambda: loss_fn(model(X), y))
-                gnr_writer.writerow({"config": name, "seed": args.seed, "step": step, "ratio": f"{r:.5g}"})
             optimizer.reset_grad()
             logits = model(X)
             loss = loss_fn(logits, y)
@@ -199,7 +194,6 @@ def main():
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--hidden", type=int, default=256)
-    parser.add_argument("--optimizer", choices=["sgd", "adam"], default="sgd")
     parser.add_argument("--lr", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train-subset", type=int, default=0,
@@ -207,10 +201,6 @@ def main():
     parser.add_argument("--dataset", choices=DATASETS, default="mnist")
     parser.add_argument("--save-weights", default="",
                         help="checkpoint path, may use {config} and {seed}")
-    parser.add_argument("--monitor-every", type=int, default=0,
-                        help="log the gradient-to-noise ratio every N steps (0 = off)")
-    parser.add_argument("--switch-step", type=int, default=0,
-                        help="switch backward matmuls to FP32 at this step (0 = never)")
     args = parser.parse_args()
 
     device = getattr(ndl, args.device)()
@@ -227,20 +217,12 @@ def main():
     print(f"Training {len(configs)} configs on {device}: {[c.name for c in configs]}")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    gnr_file = open(args.out.replace(".csv", "_gnr.csv"), "w", newline="") if args.monitor_every else None
-    gnr_writer = csv.DictWriter(gnr_file, fieldnames=["config", "seed", "step", "ratio"]) if gnr_file else None
-    if gnr_writer:
-        gnr_writer.writeheader()
     with open(args.out, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         writer.writeheader()
         for config in configs:
-            train_one(config, args, train_set, test_set, device, writer, gnr_writer)
+            train_one(config, args, train_set, test_set, device, writer)
             f.flush()
-            if gnr_file:
-                gnr_file.flush()
-    if gnr_file:
-        gnr_file.close()
     print(f"Wrote {args.out}")
 
 

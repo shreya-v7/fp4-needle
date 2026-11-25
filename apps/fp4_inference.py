@@ -12,9 +12,6 @@ and the model runs from them:
   5. batch-size-1 latency, the "generation" setting: one input vector at a
      time, so every layer is a GEMV (FP32 GEMV vs NVFP4 GEMV kernels).
 
-It also prints the weight memory of the LSTM language model from apps/models.py
-at the sizes we train, to show the saving on a bigger model.
-
     python3 apps/fp4_inference.py --device cuda
 """
 import argparse
@@ -173,14 +170,6 @@ def main():
           f"({t32 / t4:.2f}x); same prediction on {agree * 100:.1f}% of images")
     print("  (MNIST layers are small, so per-call overhead dominates here; "
           "benchmarks/bench_gemv.py measures the kernels at 4096 x 4096.)")
-
-    # Bigger model: the LSTM language model's weights (vocab 10000 as in PTB).
-    print("\nLSTM language model (PTB, embedding 100, hidden 100, 1 layer) weight memory:")
-    vocab, emb, hid = 10000, 100, 100
-    memory_table([("embedding", (vocab, emb)), ("lstm.W_ih", (4 * hid, emb)),
-                  ("lstm.W_hh", (4 * hid, hid)), ("lstm.bias_ih", (4 * hid,)),
-                  ("lstm.bias_hh", (4 * hid,)), ("linear.weight", (vocab, hid)),
-                  ("linear.bias", (vocab,))])
 
 
 if __name__ == "__main__":

@@ -1,8 +1,7 @@
 # AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
-"""Shared helpers for the experiment runners: named parameters, checkpoints, safetensors."""
+"""Checkpoint helpers for the experiment runners (save, load, and load back into a model)."""
 import json
 import os
-import struct
 
 import numpy as np
 
@@ -46,28 +45,3 @@ def load_checkpoint(path):
 def assign_weights(model, arrays, device):
     for name, p in named_parameters(model):
         p.data = ndl.Tensor(arrays[name].astype(np.float32), device=device)
-
-
-def is_matmul_weight(name, array):
-    """2-D weights used as the right operand of x @ W (reduction axis 0); not embeddings."""
-    return array.ndim == 2 and "embedding" not in name and min(array.shape) >= 2
-
-
-_ST_DTYPES = {"F32": np.float32, "F16": np.float16}
-
-
-def read_safetensors(path, keep=lambda name, shape: True):
-    """Minimal safetensors reader (no PyTorch): 8-byte header length, JSON header, raw data."""
-    with open(path, "rb") as f:
-        (n,) = struct.unpack("<Q", f.read(8))
-        header = json.loads(f.read(n))
-        base = 8 + n
-        out = {}
-        for name, info in header.items():
-            if name == "__metadata__" or not keep(name, info["shape"]):
-                continue
-            start, end = info["data_offsets"]
-            f.seek(base + start)
-            dtype = _ST_DTYPES[info["dtype"]]
-            out[name] = np.frombuffer(f.read(end - start), dtype=dtype).reshape(info["shape"]).astype(np.float32)
-    return out
