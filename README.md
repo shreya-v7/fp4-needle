@@ -13,6 +13,10 @@ JAX in project code; NumPy is used only for the reference quantizer and tests.
    rounding fix it?
 2. **Systems:** how much memory and matrix-vector (GEMV) time does 4-bit weight
    storage save during generation?
+3. **Storage formats:** at about 4.5 bits per weight, which 4-bit format (NVFP4,
+   MXFP4, NVINT4, INT4, NF4, with or without a Hadamard rotation) loses the least,
+   on our models and on GPT-2? And does 4-bit training follow the published
+   sqrt(3) gradient-to-noise rule?
 
 ## Status
 
@@ -24,6 +28,7 @@ JAX in project code; NumPy is used only for the reference quantizer and tests.
 | 3 | MNIST MLP experiments (FP32 / Fprop / +Dgrad / +Wgrad, with and without SR) | done on CPU (below); GPU runs via the notebook |
 | 4 | Packed NVFP4 storage, quantize+pack and FP4 GEMV kernels (CPU + CUDA), GEMV benchmark, 4-bit inference | done; CPU bit-exact, CUDA tests and benchmark run on Colab |
 | + | LSTM language model with FP4 matmuls (PTB) | done (below) |
+| + | Paper experiments: format storage study, sqrt(3) monitor, mini-GPT | storage study done on CPU (below); sweeps run via `notebooks/fp4_paper_experiments.ipynb` |
 
 ## NVFP4 in one paragraph
 
@@ -61,15 +66,18 @@ always encoded as `+0`) are documented at the top of
 ```
 python/needle/          needle from our homeworks (hw0 to hw4 + transformer)
 python/needle/fp4/      FP4 code: NumPy reference, NDArray fake quantization, QuantConfig,
-                        packed.py (NVFP4Matrix: real 4-bit storage + GEMV)
+                        packed.py (NVFP4Matrix: real 4-bit storage + GEMV),
+                        formats.py (plug-in 4-bit formats, rotations), monitor.py (sqrt(3) test)
 python/needle/ops/ops_fp4.py   FP4Matmul Op (each training matmul can run in FP4)
 python/needle/nn/nn_fp4.py     nn.QuantizedLinear (drop-in for nn.Linear)
 src/                    C++ (CPU) and CUDA backends, exposed with pybind11;
                         nvfp4.h holds the NVFP4 arithmetic both backends share
 apps/                   homework models, plus fp4_experiment.py (MNIST), fp4_lstm_experiment.py
-                        (PTB LSTM), fp4_grad_error.py, fp4_inference.py and plot_fp4.py
+                        (PTB LSTM), fp4_gpt_experiment.py (mini-GPT), fp4_storage.py
+                        (format study), fp4_grad_error.py, fp4_inference.py, plot_fp4.py, plot_paper.py
 benchmarks/             bench_gemv.py: FP32 vs NVFP4 GEMV kernels
-notebooks/              fp4_experiments.ipynb: tests + experiments on a Colab GPU
+notebooks/              fp4_experiments.ipynb: tests + experiments on a Colab GPU;
+                        fp4_paper_experiments.ipynb: the paper experiments (E1 to E4)
 docs/results/           plots and summary tables from our runs
 tests/hw4, hw4_extra/   course tests (need PyTorch and mugrade, see below)
 tests/fp4/              our FP4 tests (NumPy and pytest only)
@@ -201,6 +209,41 @@ here are the readable reference versions, not optimized.
 
 ![MNIST grid](docs/results/cpu_sgd/mnist_grid.png)
 ![Gradient error](docs/results/cpu_sgd/grad_error.png)
+
+## Paper experiments
+
+`notebooks/fp4_paper_experiments.ipynb` runs four experiments on Colab (set `QUICK=False`
+for the full sweeps); the last cell zips `results/paper`.
+
+| | Experiment | Script |
+|---|---|---|
+| E1 | Storage: error of each 4-bit format with and without rotation, on our checkpoints and GPT-2, plus post-training quantization | `apps/fp4_storage.py` |
+| E2 | sqrt(3) rule: gradient-to-noise ratio during training, and switching the backward pass to FP32 | `apps/fp4_gpt_experiment.py --monitor-every --switch-step` |
+| E3 | Data size: LSTM on 2k, 10k and all PTB lines | `apps/fp4_lstm_experiment.py --max-lines` |
+| E4 | Model size: mini-GPT on text8 at 0.1M, 0.8M, 4.7M parameters | `apps/fp4_gpt_experiment.py --size` |
+
+CPU results for E1 are in [`docs/results/paper_cpu/`](docs/results/paper_cpu). On all 48
+GPT-2 matmul weights (SQNR in dB, higher is better):
+
+| Format | Bits per weight | No rotation | Hadamard 16 | Hadamard 128 |
+|---|---|---|---|---|
+| NVINT4 | 4.5 | 21.08 | 21.33 | 21.29 |
+| NF4-g64 | 4.25 | 20.56 | 20.72 | 20.73 |
+| NVFP4 | 4.5 | 20.47 | 20.42 | 20.43 |
+| INT4-g32 | 4.5 | 19.96 | 20.30 | 20.28 |
+| MXFP4 | 4.25 | 18.66 | 18.76 | 18.76 |
+| INT4-g128 | 4.125 | 17.93 | 18.51 | 18.65 |
+
+NVINT4 (integer levels with NVFP4's scales) beats NVFP4 on 98% of the matrices, and
+INT4's error follows NMSE = crest factor / 588 (correlation 0.97). Both match published
+work: Chen et al., "INT v.s. FP" (arXiv 2510.25602) and Castro, Egiazarian et al.,
+"Bridging the Gap" (arXiv 2509.23202).
+
+## AI assistance
+
+Much of the FP4 code was written with an AI coding assistant (Claude, via Claude Code)
+and reviewed and tested by the team. Every such file or edited section starts with a
+one-line `AI-assisted:` marker. See the AI usage statement in our final report.
 
 ## Contributing
 
