@@ -85,23 +85,24 @@ tests/fp4/              our FP4 tests (NumPy and pytest only)
 ## Running on Google Colab
 
 Open `notebooks/fp4_experiments.ipynb` from GitHub in Colab (File > Open notebook >
-GitHub), pick a GPU runtime (Runtime > Change runtime type), and Run all. It clones
-the repo into Drive, builds needle with `make` (CPU and CUDA backends), runs the tests,
-the Stage 4 benchmark and every experiment. Set `BRANCH` in the first cell to try a
-`dev/<name>-<topic>` branch. If the repo is private, add a `GITHUB_TOKEN` secret in
+GitHub), pick a GPU runtime (Runtime > Change runtime type), and Run all. One run clones
+the repo into Drive, builds needle (CPU and CUDA backends), runs every test in `tests/fp4`
+including the CUDA kernels, runs the GEMV benchmark and inference from packed 4-bit
+weights, and zips the output as `fp4_results.zip`. The training grids use fake
+quantization, which is bit-identical on CPU and GPU, so they were run on CPU (results in
+`docs/results/`); set `RUN_TRAINING = True` to repeat them on the GPU. Set `BRANCH` to try
+a `dev/<name>-<topic>` branch. If the repo is private, add a `GITHUB_TOKEN` secret in
 Colab (the setup cell explains how).
 
 The course tests in `tests/hw4` and `tests/hw4_extra` compare against PyTorch
 (already installed on Colab) and import `mugrade`:
 `!pip3 install --upgrade --no-deps git+https://github.com/dlsys10714/mugrade.git`.
 They also need the datasets in `data/` (not tracked in git); the notebook downloads
-MNIST, CIFAR-10 and PTB.
+MNIST (and CIFAR-10 when training).
 
 ## Running the experiments
 
-The easiest way is `notebooks/fp4_experiments.ipynb` on Colab with a GPU runtime: it
-builds needle, runs the tests (including CUDA), and trains every configuration.
-From a terminal in the repo root:
+From a terminal in the repo root (`--device cpu` works for every training command):
 
 ```bash
 python3 apps/fp4_experiment.py --configs all --device cuda --epochs 3 --seed 0 --out results/mnist_seed0.csv
