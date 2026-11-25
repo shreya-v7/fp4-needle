@@ -16,7 +16,7 @@ JAX in project code; NumPy is used only for the reference quantizer and tests.
 3. **Storage formats:** at about 4.5 bits per weight, which 4-bit format (NVFP4,
    MXFP4, NVINT4, INT4, NF4, with or without a Hadamard rotation) loses the least,
    on our models and on GPT-2? And does 4-bit training follow the published
-   sqrt(3) gradient-to-noise rule?
+   sqrt(3) gradient-to-noise rule? (MXFP4 was our stretch goal.)
 
 ## Status
 
@@ -28,7 +28,7 @@ JAX in project code; NumPy is used only for the reference quantizer and tests.
 | 3 | MNIST MLP experiments (FP32 / Fprop / +Dgrad / +Wgrad, with and without SR) | done on CPU (below); GPU runs via the notebook |
 | 4 | Packed NVFP4 storage, quantize+pack and FP4 GEMV kernels (CPU + CUDA), GEMV benchmark, 4-bit inference | done; CPU bit-exact, CUDA tests and benchmark run on Colab |
 | + | LSTM language model with FP4 matmuls (PTB) | done (below) |
-| + | Paper experiments: format storage study, sqrt(3) monitor, mini-GPT | storage study done on CPU (below); sweeps run via `notebooks/fp4_paper_experiments.ipynb` |
+| + | 4-bit format study (NVFP4, MXFP4, INT4, NF4) and sqrt(3) gradient-noise check | format study done on CPU (below); GPU runs via the notebook |
 
 ## NVFP4 in one paragraph
 
@@ -73,11 +73,9 @@ python/needle/nn/nn_fp4.py     nn.QuantizedLinear (drop-in for nn.Linear)
 src/                    C++ (CPU) and CUDA backends, exposed with pybind11;
                         nvfp4.h holds the NVFP4 arithmetic both backends share
 apps/                   homework models, plus fp4_experiment.py (MNIST), fp4_lstm_experiment.py
-                        (PTB LSTM), fp4_gpt_experiment.py (mini-GPT), fp4_storage.py
-                        (format study), fp4_grad_error.py, fp4_inference.py, plot_fp4.py, plot_paper.py
+                        (PTB LSTM), fp4_storage.py (format study), fp4_grad_error.py, fp4_inference.py, plot_fp4.py, plot_paper.py
 benchmarks/             bench_gemv.py: FP32 vs NVFP4 GEMV kernels
-notebooks/              fp4_experiments.ipynb: tests + experiments on a Colab GPU;
-                        fp4_paper_experiments.ipynb: the paper experiments (E1 to E4)
+notebooks/              fp4_experiments.ipynb: tests + all experiments on a Colab GPU
 docs/results/           plots and summary tables from our runs
 tests/hw4, hw4_extra/   course tests (need PyTorch and mugrade, see below)
 tests/fp4/              our FP4 tests (NumPy and pytest only)
@@ -210,19 +208,18 @@ here are the readable reference versions, not optimized.
 ![MNIST grid](docs/results/cpu_sgd/mnist_grid.png)
 ![Gradient error](docs/results/cpu_sgd/grad_error.png)
 
-## Paper experiments
+## Format study and the sqrt(3) check
 
-`notebooks/fp4_paper_experiments.ipynb` runs four experiments on Colab (set `QUICK=False`
-for the full sweeps); the last cell zips `results/paper`.
+Both run in `notebooks/fp4_experiments.ipynb` after the MNIST and LSTM sections:
 
-| | Experiment | Script |
-|---|---|---|
-| E1 | Storage: error of each 4-bit format with and without rotation, on our checkpoints and GPT-2, plus post-training quantization | `apps/fp4_storage.py` |
-| E2 | sqrt(3) rule: gradient-to-noise ratio during training, and switching the backward pass to FP32 | `apps/fp4_gpt_experiment.py --monitor-every --switch-step` |
-| E3 | Data size: LSTM on 2k, 10k and all PTB lines | `apps/fp4_lstm_experiment.py --max-lines` |
-| E4 | Model size: mini-GPT on text8 at 0.1M, 0.8M, 4.7M parameters | `apps/fp4_gpt_experiment.py --size` |
+* `apps/fp4_storage.py` quantizes the trained FP32 MLP and LSTM (and optionally GPT-2's published
+  weights) with each format in `python/needle/fp4/formats.py`, with and without a Hadamard rotation,
+  and reports error, bits per weight and test accuracy or perplexity.
+* `apps/fp4_experiment.py --monitor-every N --switch-step S` logs the gradient-to-noise ratio
+  r = ||g|| / ||g_q - g|| during training and can switch the backward pass to FP32 at step S;
+  `apps/plot_paper.py threshold` plots r against sqrt(3).
 
-CPU results for E1 are in [`docs/results/paper_cpu/`](docs/results/paper_cpu). On all 48
+CPU results of the format study are in [`docs/results/paper_cpu/`](docs/results/paper_cpu). On all 48
 GPT-2 matmul weights (SQNR in dB, higher is better):
 
 | Format | Bits per weight | No rotation | Hadamard 16 | Hadamard 128 |

@@ -5,7 +5,7 @@ For every matmul weight in the given checkpoints (from the runners' --save-weigh
 and, optionally, GPT-2's published weights, it records the crest factor and the
 quantization error (NMSE) of each format in fp4/formats.py, with and without a
 random Hadamard rotation. With --ptq it also loads each format's weights back into
-the needle model and measures test accuracy / perplexity / bits per character.
+the needle model and measures test accuracy or perplexity.
 
     python3 apps/fp4_storage.py --checkpoints results/ckpt/*.npz --gpt2 data/gpt2/model.safetensors \\
         --ptq --out-dir results/storage
@@ -26,7 +26,7 @@ import needle as ndl
 from needle.fp4 import formats as F
 from fp4_common import assign_weights, is_matmul_weight, load_checkpoint, read_safetensors
 
-RUNNERS = {"mlp": "fp4_experiment", "lstm": "fp4_lstm_experiment", "gpt": "fp4_gpt_experiment"}
+RUNNERS = {"mlp": "fp4_experiment", "lstm": "fp4_lstm_experiment"}
 GPT2_KEEP = ("attn.c_attn.weight", "attn.c_proj.weight", "mlp.c_fc.weight", "mlp.c_proj.weight")
 
 

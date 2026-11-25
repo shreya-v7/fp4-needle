@@ -117,13 +117,3 @@ def test_safetensors_reader(tmp_path):
     path = tmp_path / "t.safetensors"
     path.write_bytes(struct.pack("<Q", len(header)) + header + a.tobytes())
     np.testing.assert_array_equal(read_safetensors(str(path))["x.weight"], a)
-
-
-def test_transformer_config_none_equals_fp32_config():
-    from fp4_gpt_experiment import MiniGPT
-    x = ndl.Tensor(RNG.integers(0, 11, (8, 2)).astype(np.float32), device=nd.cpu())
-    np.random.seed(3)
-    a = MiniGPT(11, 16, 1, 2, 8, None, nd.cpu())
-    np.random.seed(3)
-    b = MiniGPT(11, 16, 1, 2, 8, QuantConfig(), nd.cpu())
-    np.testing.assert_array_equal(a(x).numpy(), b(x).numpy())
