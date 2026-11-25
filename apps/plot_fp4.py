@@ -217,7 +217,7 @@ def main():
          os.path.join(args.out_dir, f"{args.prefix}_grid.png"))
     plot(rows, ABLATION, f"{args.title}: one backward matmul in FP4",
          os.path.join(args.out_dir, f"{args.prefix}_ablation.png"))
-    if any("+w" in c for c in rows):
+    if any(c.endswith(("+w2d", "+wsr")) for c in rows):
         plot(rows, WEIGHTS, f"{args.title}: how W is quantized for Fprop and Dgrad",
              os.path.join(args.out_dir, f"{args.prefix}_weights.png"))
     summary(rows, os.path.join(args.out_dir, "summary.md"))
