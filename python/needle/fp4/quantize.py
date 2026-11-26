@@ -34,6 +34,15 @@ def seed_sr(seed: int):
     _sr_rng = np.random.default_rng(seed)
 
 
+def sr_state():
+    """State of the stochastic-rounding stream (for exact resume from a checkpoint)."""
+    return _sr_rng.bit_generator.state
+
+
+def set_sr_state(state):
+    _sr_rng.bit_generator.state = state
+
+
 def sr_uniforms(shape):
     """Next uniforms in [0, 1) from the stochastic-rounding stream, as float32."""
     return _sr_rng.random(shape, dtype=np.float32)

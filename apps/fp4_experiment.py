@@ -21,6 +21,7 @@ like the homework's apps/simple_ml.py; all model math runs in needle.
 """
 import argparse
 import csv
+import json
 import os
 import sys
 import time
@@ -33,7 +34,7 @@ import numpy as np
 import needle as ndl
 import needle.nn as nn
 from needle.fp4.config import QuantConfig
-from needle.fp4.quantize import seed_sr
+from needle.fp4.quantize import seed_sr, set_sr_state, sr_state
 from fp4_common import save_checkpoint
 
 # ----------------------------------------------------------------------------
@@ -158,8 +159,40 @@ def evaluate(model, dataset, device, batch_size=1000):
 # Training
 # ----------------------------------------------------------------------------
 
-def train_one(config, args, train_set, test_set, device, writer):
-    """Train one config from scratch and stream its metrics to the CSV writer."""
+def epoch_checkpoint(args, name):
+    """Path of a run's end-of-epoch training state, or None when checkpoints are off."""
+    return os.path.join(args.checkpoint_dir, f"{name}_s{args.seed}.npz") if args.checkpoint_dir else None
+
+
+def checkpointed_epochs(args, name):
+    path = epoch_checkpoint(args, name)
+    return int(np.load(path)["epoch"]) if path and os.path.exists(path) else 0
+
+
+def save_state(path, epoch, step, model, optimizer, elapsed):
+    """Everything needed to continue exactly: weights, SGD momentum, SR random state, counters.
+    (The data order needs nothing: it is re-seeded at the start of every epoch.)"""
+    params = model.parameters()
+    arrays = {f"p{i}": p.numpy() for i, p in enumerate(params)}
+    arrays.update({f"u{i}": optimizer.u[p].numpy() for i, p in enumerate(params) if p in optimizer.u})
+    tmp = path + ".tmp.npz"
+    np.savez(tmp, epoch=epoch, step=step, elapsed=elapsed, sr=json.dumps(sr_state()), **arrays)
+    os.replace(tmp, path)   # atomic: an interruption never leaves a half-written checkpoint
+
+
+def load_state(path, model, optimizer, device):
+    data = np.load(path)
+    for i, p in enumerate(model.parameters()):
+        p.data = ndl.Tensor(data[f"p{i}"], device=device)
+        if f"u{i}" in data:
+            optimizer.u[p] = ndl.Tensor(data[f"u{i}"], device=device)
+    set_sr_state(json.loads(str(data["sr"])))
+    return int(data["epoch"]), int(data["step"]), float(data["elapsed"])
+
+
+def train_one(config, args, train_set, test_set, device, writer, out_file=None):
+    """Train one config (from scratch, or from its last end-of-epoch checkpoint) and stream
+    its metrics to the CSV writer."""
     # Same seed for every config: identical initial weights and data order, so
     # differences between runs come only from FP4.
     np.random.seed(args.seed)
@@ -169,14 +202,19 @@ def train_one(config, args, train_set, test_set, device, writer):
     optimizer = ndl.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
     loss_fn = nn.SoftmaxLoss()
     start = time.time()
+    first_epoch, step = 1, 0
+    ckpt = epoch_checkpoint(args, name)
+    if ckpt and os.path.exists(ckpt):
+        done, step, elapsed = load_state(ckpt, model, optimizer, device)
+        first_epoch, start = done + 1, start - elapsed
+        print(f"  {name}: continuing from the checkpoint after epoch {done}", flush=True)
 
     def log(split, epoch, step, loss, acc):
         writer.writerow({"config": name, "seed": args.seed, "split": split,
                          "epoch": epoch, "step": step, "loss": f"{loss:.6f}",
                          "accuracy": f"{acc:.4f}", "elapsed_s": f"{time.time() - start:.1f}"})
 
-    step = 0
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(first_epoch, args.epochs + 1):
         # The DataLoader shuffles with np.random, which SR also draws from during
         # backward. Reseeding here gives every config the same batches each epoch.
         np.random.seed(args.seed * 1000 + epoch)
@@ -198,6 +236,12 @@ def train_one(config, args, train_set, test_set, device, writer):
         log("test", epoch, step, test_loss, test_acc)
         print(f"  {name:24s} epoch {epoch}: test loss {test_loss:.4f}  "
               f"test acc {test_acc:.4f}  ({time.time() - start:.0f}s)", flush=True)
+        if ckpt:
+            out_file.flush()                 # this epoch's rows reach the disk before its checkpoint,
+            os.fsync(out_file.fileno())      # so the CSV is never behind the checkpoint
+            save_state(ckpt, epoch, step, model, optimizer, time.time() - start)
+    if ckpt and os.path.exists(ckpt):
+        os.remove(ckpt)   # the run is complete; its rows are in the CSV
     if args.save_weights:
         path = args.save_weights.format(config=name, seed=args.seed)
         save_checkpoint(model, path, {"runner": "mlp", "dataset": args.dataset, "hidden": args.hidden,
@@ -223,6 +267,8 @@ def main():
     parser.add_argument("--dataset", choices=DATASETS, default="mnist")
     parser.add_argument("--resume", action="store_true",
                         help="keep configs already finished in --out and train only the rest")
+    parser.add_argument("--checkpoint-dir", default="",
+                        help="save training state after every epoch here, so --resume continues mid-run")
     parser.add_argument("--save-weights", default="",
                         help="checkpoint path, may use {config} and {seed}")
     args = parser.parse_args()
@@ -241,6 +287,8 @@ def main():
     print(f"Training {len(configs)} configs on {device}: {[c.name for c in configs]}")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    if args.checkpoint_dir:
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
     kept = []
     if args.resume and os.path.exists(args.out):
         # A config is finished when it has a test row for every epoch; drop partial runs.
@@ -248,7 +296,9 @@ def main():
             old = list(csv.DictReader(f))
         done = {c.name for c in configs
                 if sum(r["config"] == c.name and r["split"] == "test" for r in old) == args.epochs}
-        kept = [r for r in old if r["config"] in done]
+        # Unfinished runs keep their rows up to their last checkpoint (none without checkpoints).
+        upto = {c.name: (args.epochs if c.name in done else checkpointed_epochs(args, c.name)) for c in configs}
+        kept = [r for r in old if r["config"] in upto and int(r["epoch"]) <= upto[r["config"]]]
         configs = [c for c in configs if c.name not in done]
         print(f"Resuming: {sorted(done)} already finished; training {[c.name for c in configs]}")
     with open(args.out, "w", newline="") as f:
@@ -256,7 +306,7 @@ def main():
         writer.writeheader()
         writer.writerows(kept)
         for config in configs:
-            train_one(config, args, train_set, test_set, device, writer)
+            train_one(config, args, train_set, test_set, device, writer, f)
             f.flush()
     print(f"Wrote {args.out}")
 
