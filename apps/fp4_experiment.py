@@ -33,6 +33,7 @@ import numpy as np
 import needle as ndl
 import needle.nn as nn
 from needle.fp4.config import QuantConfig
+from needle.fp4.quantize import seed_sr
 from fp4_common import save_checkpoint
 
 # ----------------------------------------------------------------------------
@@ -64,7 +65,21 @@ ABLATION = [
 WEIGHTS = [QuantConfig(fprop=True, dgrad=True, wgrad=True, stochastic=sr, weights=w)
            for sr in (False, True) for w in ("2d", "sr")]
 
-CONFIG_SETS = {"grid": GRID, "ablation": ABLATION, "weights": WEIGHTS, "all": GRID + ABLATION}
+# Dgrad with only one operand quantized, to separate the gradient dY from the weight W.
+ISOLATE = [QuantConfig(dgrad=True, dgrad_operands="dy"),
+           QuantConfig(dgrad=True, dgrad_operands="dy", stochastic=True),
+           QuantConfig(dgrad=True, dgrad_operands="w")]
+
+# The extended study: the configurations that carry the result, plus the isolation runs.
+EXTENDED = [QuantConfig(), QuantConfig(dgrad=True), QuantConfig(dgrad=True, stochastic=True)] + ISOLATE + [
+    QuantConfig(fprop=True, dgrad=True, wgrad=True),
+    QuantConfig(fprop=True, dgrad=True, wgrad=True, stochastic=True)]
+
+# For the learning-rate and depth sweeps.
+CORE = [QuantConfig(), QuantConfig(dgrad=True), QuantConfig(dgrad=True, stochastic=True)]
+
+CONFIG_SETS = {"grid": GRID, "ablation": ABLATION, "weights": WEIGHTS, "isolate": ISOLATE,
+               "extended": EXTENDED, "core": CORE, "all": GRID + ABLATION}
 
 CSV_FIELDS = ["config", "seed", "split", "epoch", "step", "loss", "accuracy", "elapsed_s"]
 
@@ -73,14 +88,14 @@ CSV_FIELDS = ["config", "seed", "split", "epoch", "step", "loss", "accuracy", "e
 # Model and data
 # ----------------------------------------------------------------------------
 
-def make_mlp(config, hidden, device, in_features=784):
-    """in_features -> hidden -> hidden -> 10 MLP where every linear layer uses `config`."""
-    return nn.Sequential(
-        nn.Flatten(),
-        nn.QuantizedLinear(in_features, hidden, device=device, config=config), nn.ReLU(),
-        nn.QuantizedLinear(hidden, hidden, device=device, config=config), nn.ReLU(),
-        nn.QuantizedLinear(hidden, 10, device=device, config=config),
-    )
+def make_mlp(config, hidden, device, in_features=784, depth=2):
+    """MLP with `depth` hidden layers of width `hidden` (in -> hidden x depth -> 10), every
+    linear layer using `config`. depth=2 is the model used throughout the report."""
+    layers = [nn.Flatten(), nn.QuantizedLinear(in_features, hidden, device=device, config=config), nn.ReLU()]
+    for _ in range(depth - 1):
+        layers += [nn.QuantizedLinear(hidden, hidden, device=device, config=config), nn.ReLU()]
+    layers.append(nn.QuantizedLinear(hidden, 10, device=device, config=config))
+    return nn.Sequential(*layers)
 
 
 def load_mnist(data_dir, train_subset):
@@ -109,7 +124,7 @@ def ptq_target(meta, device):
     """Rebuild a saved MLP and return (model, evaluate) for post-training quantization."""
     load, in_features = DATASETS[meta["dataset"]]
     _, test = load(meta["data_dir"], 0)
-    model = make_mlp(QuantConfig(), meta["hidden"], device, in_features)
+    model = make_mlp(QuantConfig(), meta["hidden"], device, in_features, meta.get("depth", 2))
     return model, lambda m: {"test_acc": evaluate(m, test, device)[1]}
 
 
@@ -148,7 +163,8 @@ def train_one(config, args, train_set, test_set, device, writer):
     # Same seed for every config: identical initial weights and data order, so
     # differences between runs come only from FP4.
     np.random.seed(args.seed)
-    model = make_mlp(config, args.hidden, device, DATASETS[args.dataset][1])
+    seed_sr(args.seed)   # SR has its own random stream, restarted per run
+    model = make_mlp(config, args.hidden, device, DATASETS[args.dataset][1], args.depth)
     name = config.name
     optimizer = ndl.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
     loss_fn = nn.SoftmaxLoss()
@@ -185,7 +201,7 @@ def train_one(config, args, train_set, test_set, device, writer):
     if args.save_weights:
         path = args.save_weights.format(config=name, seed=args.seed)
         save_checkpoint(model, path, {"runner": "mlp", "dataset": args.dataset, "hidden": args.hidden,
-                                      "data_dir": args.data_dir, "config": name})
+                                      "depth": args.depth, "data_dir": args.data_dir, "config": name})
 
 
 def main():
@@ -199,11 +215,14 @@ def main():
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--hidden", type=int, default=256)
+    parser.add_argument("--depth", type=int, default=2, help="number of hidden layers")
     parser.add_argument("--lr", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train-subset", type=int, default=0,
                         help="train on only the first N images (0 = all)")
     parser.add_argument("--dataset", choices=DATASETS, default="mnist")
+    parser.add_argument("--resume", action="store_true",
+                        help="keep configs already finished in --out and train only the rest")
     parser.add_argument("--save-weights", default="",
                         help="checkpoint path, may use {config} and {seed}")
     args = parser.parse_args()
@@ -222,9 +241,20 @@ def main():
     print(f"Training {len(configs)} configs on {device}: {[c.name for c in configs]}")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    kept = []
+    if args.resume and os.path.exists(args.out):
+        # A config is finished when it has a test row for every epoch; drop partial runs.
+        with open(args.out) as f:
+            old = list(csv.DictReader(f))
+        done = {c.name for c in configs
+                if sum(r["config"] == c.name and r["split"] == "test" for r in old) == args.epochs}
+        kept = [r for r in old if r["config"] in done]
+        configs = [c for c in configs if c.name not in done]
+        print(f"Resuming: {sorted(done)} already finished; training {[c.name for c in configs]}")
     with open(args.out, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         writer.writeheader()
+        writer.writerows(kept)
         for config in configs:
             train_one(config, args, train_set, test_set, device, writer)
             f.flush()

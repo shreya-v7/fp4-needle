@@ -147,7 +147,7 @@ def _run_matmul(config, X, W, G, device, seed=0):
     Wt = ndl.Tensor(_arr(W, device), device=device)
     Y = ndl.ops.fp4_matmul(Xt, Wt, config)
     loss = (Y * ndl.Tensor(_arr(G, device), device=device)).sum()
-    np.random.seed(seed)
+    quantize.seed_sr(seed)
     loss.backward()
     return Y.numpy(), Xt.grad.numpy(), Wt.grad.numpy()
 
@@ -162,12 +162,15 @@ def _expected(config, X, W, G, device, seed=0):
     Y = mm(fq(X, 1), W_fwd) if config.fprop else mm(X, W)
 
     # Replay the random draws in the Op's order: Dgrad's dY first, then Wgrad's.
-    np.random.seed(seed)
-    draw = lambda shape: np.random.rand(*shape).astype(np.float32)
+    rng = np.random.default_rng(seed)   # the same stream as quantize.seed_sr(seed)
+    draw = lambda shape: rng.random(shape, dtype=np.float32)
     if config.dgrad:
-        rand = draw(G.shape) if config.stochastic else None
-        dY_q = fq(G, 1, config.stochastic, rand)
-        if config.weights == "2d":
+        ops = config.dgrad_operands
+        rand = draw(G.shape) if config.stochastic and ops != "w" else None
+        dY_q = fq(G, 1, config.stochastic, rand) if ops != "w" else G
+        if ops == "dy":
+            W_q = W
+        elif config.weights == "2d":
             W_q = ref.fake_quant_2d(W)
         elif config.weights == "sr":
             W_q = fq(W_fwd if config.fprop else W, 1, True, draw(W.shape))
@@ -191,7 +194,11 @@ ALL_CONFIGS = [FP32, FPROP, FPROP_DGRAD, FPROP_DGRAD_WGRAD,
                QuantConfig(fprop=True, dgrad=True, weights="2d"),
                QuantConfig(fprop=True, dgrad=True, wgrad=True, stochastic=True, weights="2d"),
                QuantConfig(fprop=True, dgrad=True, weights="sr"),
-               QuantConfig(dgrad=True, wgrad=True, stochastic=True, weights="sr")]
+               QuantConfig(dgrad=True, wgrad=True, stochastic=True, weights="sr"),
+               QuantConfig(dgrad=True, dgrad_operands="dy"),
+               QuantConfig(dgrad=True, dgrad_operands="dy", stochastic=True),
+               QuantConfig(dgrad=True, dgrad_operands="w"),
+               QuantConfig(fprop=True, dgrad=True, wgrad=True, stochastic=True, dgrad_operands="dy")]
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -265,3 +272,12 @@ def test_quantized_mlp_trains():
         opt.step()
         losses.append(float(loss.numpy()))
     assert losses[-1] < 0.5 * losses[0]
+
+
+def test_stochastic_rounding_does_not_touch_numpy_global_stream():
+    """SR has its own generator, so data shuffling and init (np.random) are unaffected by it."""
+    np.random.seed(7)
+    expected = np.random.rand(3)
+    np.random.seed(7)
+    quantize.fake_quant(_arr(np.ones((4, 16)), nd.cpu()), axis=1, stochastic=True)
+    np.testing.assert_array_equal(np.random.rand(3), expected)

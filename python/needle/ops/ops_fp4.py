@@ -41,8 +41,11 @@ class FP4Matmul(TensorOp):
         # Dgrad: dX = dY @ W^T reduces over `out` (axis 1 of both dY and W).
         # (When SR is on, its random numbers are drawn here first, then in Wgrad.)
         if cfg.dgrad:
-            dY_q = fake_quant(dY, axis=1, stochastic=cfg.stochastic)
-            if cfg.weights == "2d":     # the same tiles as in Fprop
+            ops = cfg.dgrad_operands    # "both", or only "dy" / only "w" to isolate their effects
+            dY_q = fake_quant(dY, axis=1, stochastic=cfg.stochastic) if ops != "w" else dY
+            if ops == "dy":
+                W_q = W
+            elif cfg.weights == "2d":   # the same tiles as in Fprop
                 W_q = fake_quant_2d(W)
             elif cfg.weights == "sr":   # the forward weight, re-quantized along `out` with SR
                 W_fwd = fake_quant(W, axis=0) if cfg.fprop else W
