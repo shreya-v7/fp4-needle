@@ -22,10 +22,11 @@ project code; NumPy is used only for the reference quantizer, data loading and t
   Fprop in FP4, and Wgrad on its own, are harmless. Quantizing W consistently for the forward and
   backward pass (NVIDIA's 16x16 tiles, or Thinking Machines' SR re-quantization) does not fix it.
   MNIST is too easy to separate the configurations (all within 0.3 points).
-* **Packed NVFP4 weights are 7x smaller** (4.5 bits per weight) with 94.01% vs 94.05% MNIST
+* **Packed NVFP4 weights are 7x smaller** (4.5 bits per weight) with 97.42% vs 97.54% MNIST
   accuracy. Our FP32 GEMV reaches 84% of the GPU's peak bandwidth; the NVFP4 GEMV kernel was
   reworked after its first GPU run and is being re-measured.
-* **NVFP4 has about 1.4 dB less weight error than MXFP4** on our MLP, for 0.25 more bits per weight.
+* **NVFP4 has about 0.8 to 0.9 dB less weight error than MXFP4** on our MNIST and CIFAR-10 MLPs, for 0.25 more
+  bits per weight; both keep accuracy within 0.5 points ([`docs/results/mxfp4/`](docs/results/mxfp4)).
 
 Details: [`docs/results/`](docs/results) and the report notebook.
 
@@ -77,10 +78,10 @@ tests/fp4/              our tests (NumPy and pytest only)
 ## Running
 
 **Colab, one shot.** Open `notebooks/fp4_experiments.ipynb` from GitHub in Colab (File > Open
-notebook > GitHub), pick a GPU runtime, Run all. It builds needle, runs every test including the
-CUDA kernels, the GEMV benchmark, packed inference, a CIFAR-10 check of the hypothesis and the
-MXFP4 comparison, and zips the output. If the repo is private, add a `GITHUB_TOKEN` secret (the
-setup cell explains how).
+notebook > GitHub) and Run all. It works with or without a GPU (a GPU adds the CUDA kernel tests
+and the GPU benchmark). It builds needle, runs the tests, re-runs the key CIFAR-10 result, the GEMV
+benchmark, packed inference and the MXFP4 comparison, prints a one-line verdict after each, and
+zips the output. If the repo is private, add a `GITHUB_TOKEN` secret (the setup cell explains how).
 
 **Terminal**, from the repo root (`--device cpu` works for every training command):
 
