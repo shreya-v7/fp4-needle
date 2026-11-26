@@ -135,6 +135,38 @@ def sweep_report(title, groups, main_runs, main_value, epochs=10):
     return lines
 
 
+def plot_curves(runs, path, epochs=20):
+    """Test accuracy by epoch, mean over seeds with a min-max band, one panel per question."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    panels = [("Round to nearest vs SR", ["fp32", "dgrad", "dgrad+sr", "fprop+dgrad+wgrad", "fprop+dgrad+wgrad+sr"]),
+              ("Which Dgrad operand: dY or W?", ["fp32", "dgrad-dy", "dgrad-dy+sr", "dgrad-w"])]
+    colors = {"fp32": "#2a78d6", "dgrad": "#e87ba4", "dgrad-dy": "#eb6834", "dgrad-w": "#6250d6",
+              "fprop+dgrad+wgrad": "#eda100"}
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4.6), sharey=True)
+    for ax, (title, configs) in zip(axes, panels):
+        for c in configs:
+            seeds = [(runs[k] + [CHANCE] * epochs)[:epochs] for k in runs if k[0] == c]
+            if not seeds:
+                continue
+            a = np.array(seeds)
+            e = np.arange(1, epochs + 1)
+            base = c[:-3] if c.endswith("+sr") else c
+            style = dict(color=colors.get(base, "#7f7f7f"), linestyle="--" if c.endswith("+sr") else "-")
+            ax.plot(e, a.mean(0), label=c, linewidth=2, **style)
+            ax.fill_between(e, a.min(0), a.max(0), alpha=0.12, color=style["color"])
+        ax.set(title=title, xlabel="epoch", ylabel="test accuracy (%)")
+        ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+        ax.grid(True, color="#e5e5e5", linewidth=0.8)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.legend(frameon=False, fontsize=8, loc="lower right")
+    fig.suptitle(f"CIFAR-10 MLP, {epochs} epochs: mean over seeds, band = min to max")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    print("wrote", path)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("folder")
@@ -154,6 +186,7 @@ def main():
     lines = ["# Extended experiments: verdicts", "",
              "Criteria from `docs/PREREGISTRATION.md`, applied by `apps/fp4_stats.py`.", ""]
     if main_runs:
+        plot_curves(main_runs, os.path.splitext(args.out)[0] + ".png")
         lines += main_report(main_runs)
         lines += sweep_report("Learning-rate sweep", {k: load(v) for k, v in lr.items()}, main_runs, "0.05")
         lines += sweep_report("Depth sweep (hidden layers)", {k: load(v) for k, v in depth.items()}, main_runs, "2")
