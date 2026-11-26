@@ -1,0 +1,16 @@
+Using needle backend
+
+MNIST MLP weight memory:
+  parameter                             shape       FP32      NVFP4
+  layer1.weight                    (256, 784)     0.766M     0.108M
+  layer1.bias                          (256,)     0.001M     0.001M
+  layer2.weight                    (256, 256)     0.250M     0.035M
+  layer2.bias                          (256,)     0.001M     0.001M
+  layer3.weight                     (10, 256)     0.010M     0.001M
+  layer3.bias                           (10,)     0.000M     0.000M
+  total                                           1.027M     0.146M  (7.03x smaller)
+  (measured packed weight bytes: 0.144M)
+
+Test accuracy: FP32 weights 97.54%   NVFP4 weights 97.42%
+Batch-1 latency per image: FP32 0.210 ms   NVFP4 0.543 ms   (0.39x); same prediction on 99.5% of images
+  (MNIST layers are small, so per-call overhead dominates here; benchmarks/bench_gemv.py measures the kernels at 4096 x 4096.)
