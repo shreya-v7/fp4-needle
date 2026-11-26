@@ -13,6 +13,8 @@ For each matrix size it reports:
 
     python3 benchmarks/bench_gemv.py --device cuda                 # 4096 x 4096
     python3 benchmarks/bench_gemv.py --device cuda --sizes 1024 2048 4096 8192
+    # rectangular weights of a 7B-class LLM: attention (4096x4096), MLP up (11008x4096), down (4096x11008)
+    python3 benchmarks/bench_gemv.py --device cuda --sizes 4096 --shapes 11008x4096 4096x11008
 
 On the CPU it uses wall-clock timing (only to check the script works; the
 numbers that matter are GPU numbers).
@@ -44,35 +46,36 @@ def time_cpu(fn, warmup, iters):
     return (time.perf_counter() - start) / iters * 1e3
 
 
-def bench_size(device, n, warmup, iters):
-    rng = np.random.default_rng(n)
-    w_np = rng.standard_normal((n, n)).astype(np.float32)
-    x_np = rng.standard_normal(n).astype(np.float32)
+def bench_size(device, rows, cols, warmup, iters):
+    """y = W x with W of shape (rows, cols): rows outputs, cols-long dot products."""
+    rng = np.random.default_rng(rows * 100003 + cols)
+    w_np = rng.standard_normal((rows, cols)).astype(np.float32)
+    x_np = rng.standard_normal(cols).astype(np.float32)
     w = nd.array(w_np, device=device)
     x = nd.array(x_np, device=device)
-    y32 = nd.NDArray.make((n,), device=device)
+    y32 = nd.NDArray.make((rows,), device=device)
     W4 = NVFP4Matrix.quantize(w)
-    y4 = nd.NDArray.make((n,), device=device)
+    y4 = nd.NDArray.make((rows,), device=device)
     on_gpu = device.name == "cuda"
 
     # --- FP32 GEMV: our warp-per-row kernel -----------------------------------
     if on_gpu:
-        t32 = device.bench_gemv_fp32(w._handle, x._handle, y32._handle, n, n, warmup, iters)
+        t32 = device.bench_gemv_fp32(w._handle, x._handle, y32._handle, rows, cols, warmup, iters)
     else:
-        t32 = time_cpu(lambda: device.gemv_fp32(w._handle, x._handle, y32._handle, n, n),
+        t32 = time_cpu(lambda: device.gemv_fp32(w._handle, x._handle, y32._handle, rows, cols),
                        warmup, iters)
     # --- NVFP4 GEMV: reads the packed 4-bit weights directly -------------------
     if on_gpu:
         t4 = device.bench_nvfp4_gemv(W4.packed, W4.scales, W4.tensor_scale, x._handle,
-                                     y4._handle, n, n, warmup, iters)
+                                     y4._handle, rows, cols, warmup, iters)
     else:
         t4 = time_cpu(lambda: device.nvfp4_gemv(W4.packed, W4.scales, W4.tensor_scale,
-                                                x._handle, y4._handle, n, n), warmup, iters)
-    device.gemv_fp32(w._handle, x._handle, y32._handle, n, n)
-    device.nvfp4_gemv(W4.packed, W4.scales, W4.tensor_scale, x._handle, y4._handle, n, n)
+                                                x._handle, y4._handle, rows, cols), warmup, iters)
+    device.gemv_fp32(w._handle, x._handle, y32._handle, rows, cols)
+    device.nvfp4_gemv(W4.packed, W4.scales, W4.tensor_scale, x._handle, y4._handle, rows, cols)
 
     # --- the homework's general matmul as a third reference point --------------
-    x_col = x.reshape((n, 1))
+    x_col = x.reshape((cols, 1))
     def homework_matmul():
         out = w @ x_col
         if on_gpu:
@@ -82,19 +85,19 @@ def bench_size(device, n, warmup, iters):
 
     y_ref = y32.numpy().astype(np.float64)
     rel_err = np.linalg.norm(y4.numpy() - y_ref) / np.linalg.norm(y_ref)
-    vec_bytes = 2 * n * 4                       # read x, write y
-    rows = []
+    vec_bytes = (cols + rows) * 4               # read x, write y
+    out = []
     for name, t_ms, w_bytes, err in [
-        ("fp32 gemv (ours)", t32, n * n * 4, 0.0),
+        ("fp32 gemv (ours)", t32, rows * cols * 4, 0.0),
         ("nvfp4 gemv (ours)", t4, W4.nbytes, rel_err),
-        ("fp32 needle matmul (hw)", t_hw, n * n * 4, 0.0),
+        ("fp32 needle matmul (hw)", t_hw, rows * cols * 4, 0.0),
     ]:
         moved = w_bytes + vec_bytes
-        rows.append({"n": n, "kernel": name, "time_us": t_ms * 1e3,
-                     "weight_MiB": w_bytes / MiB, "bytes_moved_MiB": moved / MiB,
-                     "bandwidth_GB_s": moved / (t_ms * 1e-3) / 1e9,
-                     "speedup": t32 / t_ms, "rel_error": err})
-    return rows
+        out.append({"shape": f"{rows}x{cols}", "kernel": name, "time_us": t_ms * 1e3,
+                    "weight_MiB": w_bytes / MiB, "bytes_moved_MiB": moved / MiB,
+                    "bandwidth_GB_s": moved / (t_ms * 1e-3) / 1e9,
+                    "speedup": t32 / t_ms, "rel_error": err})
+    return out
 
 
 def plot(rows, path, peak):
@@ -104,12 +107,12 @@ def plot(rows, path, peak):
     import matplotlib.pyplot as plt
 
     kernels = [("fp32 gemv (ours)", "#2a78d6", "FP32 GEMV"), ("nvfp4 gemv (ours)", "#eb6834", "NVFP4 GEMV")]
-    sizes = sorted({r["n"] for r in rows})
+    sizes = list(dict.fromkeys(r["shape"] for r in rows))   # in the order measured
     x = np.arange(len(sizes))
     fig, (ax_t, ax_bw) = plt.subplots(1, 2, figsize=(12, 4.2))
     for k, (name, color, label) in enumerate(kernels):
-        t = [next(r["time_us"] for r in rows if r["n"] == n and r["kernel"] == name) for n in sizes]
-        bw = [next(r["bandwidth_GB_s"] for r in rows if r["n"] == n and r["kernel"] == name) for n in sizes]
+        t = [next(r["time_us"] for r in rows if r["shape"] == n and r["kernel"] == name) for n in sizes]
+        bw = [next(r["bandwidth_GB_s"] for r in rows if r["shape"] == n and r["kernel"] == name) for n in sizes]
         ax_t.bar(x + (k - 0.5) * 0.38, t, 0.36, color=color, label=label)
         ax_bw.bar(x + (k - 0.5) * 0.38, bw, 0.36, color=color, label=label)
         for xi, ti in zip(x, t):
@@ -117,7 +120,7 @@ def plot(rows, path, peak):
     if peak:
         ax_bw.axhline(peak, color="#555555", linestyle="--", linewidth=1)
         ax_bw.annotate(f"GPU peak {peak:.0f} GB/s", (x[-1] + 0.4, peak), ha="right", va="bottom", fontsize=8)
-    labels = [f"{n}x{n}" for n in sizes]
+    labels = sizes
     ax_t.set(xticks=x, xticklabels=labels, ylabel="time per GEMV (microseconds)", yscale="log",
              title="Kernel time (lower is better)")
     ax_bw.set(xticks=x, xticklabels=labels, ylabel="achieved bandwidth (GB/s)",
@@ -135,7 +138,9 @@ def plot(rows, path, peak):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
-    parser.add_argument("--sizes", type=int, nargs="+", default=[4096])
+    parser.add_argument("--sizes", type=int, nargs="*", default=[4096], help="square matrices n x n")
+    parser.add_argument("--shapes", nargs="*", default=[], metavar="ROWSxCOLS",
+                        help="rectangular matrices, e.g. 11008x4096 (rows = outputs, cols = inputs)")
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=200)
     parser.add_argument("--out", default="results/bench_gemv.csv")
@@ -152,16 +157,17 @@ def main():
               f"{info['memory_gb']:.1f} GB memory")
 
     rows = []
-    for n in args.sizes:
-        rows += bench_size(device, n, args.warmup, args.iters)
+    shapes = [(n, n) for n in args.sizes] + [tuple(int(v) for v in s.split("x")) for s in args.shapes]
+    for r_, c_ in shapes:
+        rows += bench_size(device, r_, c_, args.warmup, args.iters)
     for r in rows:
         r["pct_of_peak"] = 100 * r["bandwidth_GB_s"] / peak if peak else float("nan")
 
-    header = f"{'n':>6} {'kernel':24s} {'time_us':>10} {'weight_MiB':>10} {'moved_MiB':>10} " \
+    header = f"{'shape':>11} {'kernel':24s} {'time_us':>10} {'weight_MiB':>10} {'moved_MiB':>10} " \
              f"{'GB/s':>8} {'%peak':>6} {'speedup':>8} {'rel_err':>9}"
     print(header)
     for r in rows:
-        print(f"{r['n']:>6} {r['kernel']:24s} {r['time_us']:>10.1f} {r['weight_MiB']:>10.2f} "
+        print(f"{r['shape']:>11} {r['kernel']:24s} {r['time_us']:>10.1f} {r['weight_MiB']:>10.2f} "
               f"{r['bytes_moved_MiB']:>10.2f} {r['bandwidth_GB_s']:>8.1f} {r['pct_of_peak']:>6.1f} "
               f"{r['speedup']:>7.2f}x {r['rel_error']:>9.2e}")
 

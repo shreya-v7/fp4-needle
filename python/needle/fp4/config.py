@@ -29,20 +29,26 @@ class QuantConfig:
                   (NVIDIA's NVFP4 recipe);
             "sr": Dgrad re-quantizes the forward weight with stochastic
                   rounding, equal to it in expectation (Thinking Machines' recipe).
+        dgrad_operands: which Dgrad operands are quantized, to isolate their effects:
+            "both" (default), "dy" (only the gradient dY; W stays FP32) or
+            "w" (only W; dY stays FP32).
     """
     fprop: bool = False
     dgrad: bool = False
     wgrad: bool = False
     stochastic: bool = False
     weights: str = "1d"
+    dgrad_operands: str = "both"
 
     def __post_init__(self):
         assert self.weights in ("1d", "2d", "sr"), f"unknown weights mode {self.weights!r}"
+        assert self.dgrad_operands in ("both", "dy", "w"), f"unknown dgrad_operands {self.dgrad_operands!r}"
 
     @property
     def name(self) -> str:
         """Short label used in experiment logs, e.g. 'fprop+dgrad+sr'."""
-        parts = [p for p, on in (("fprop", self.fprop), ("dgrad", self.dgrad),
+        dgrad = "dgrad" if self.dgrad_operands == "both" else f"dgrad-{self.dgrad_operands}"
+        parts = [p for p, on in (("fprop", self.fprop), (dgrad, self.dgrad),
                                  ("wgrad", self.wgrad)) if on]
         label = "+".join(parts) if parts else "fp32"
         label += "+sr" if self.stochastic else ""

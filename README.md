@@ -16,12 +16,15 @@ project code; NumPy is used only for the reference quantizer, data loading and t
 
 ## Answers so far
 
-* **Dgrad with round-to-nearest is the matmul that hurts.** On a CIFAR-10 MLP (all 50,000 images,
-  4 seeds) it drops test accuracy from 44.0% to 36.4%; with Fprop and Wgrad also in FP4, to 23.3%.
-  Stochastic rounding of the gradient brings every configuration back within 0.5 points of FP32.
-  Fprop in FP4, and Wgrad on its own, are harmless. Quantizing W consistently for the forward and
-  backward pass (NVIDIA's 16x16 tiles, or Thinking Machines' SR re-quantization) does not fix it.
-  MNIST is too easy to separate the configurations (all within 0.3 points).
+* **Round-to-nearest gradients are what break 4-bit training.** CIFAR-10 MLP, 20 epochs, 5 seeds
+  (pre-registered in [`docs/PREREGISTRATION.md`](docs/PREREGISTRATION.md), bias audit in
+  [`docs/BIAS_AUDIT.md`](docs/BIAS_AUDIT.md)): Dgrad with round-to-nearest loses 4.5 points against FP32,
+  and rounding only its gradient dY loses the same while rounding only its weight W loses 0.2. With all three
+  matmuls in FP4, round-to-nearest collapses to 12% (FP32 52%).
+* **Stochastic rounding fixes most of it, not all.** Dgrad + SR is within 0.4 points of FP32, but all three
+  in FP4 with SR ends 6.1 points behind after 20 epochs (0.7 after 3). Quantizing W consistently for the
+  forward and backward pass (NVIDIA's 16x16 tiles, Thinking Machines' SR re-quantization) does not help.
+  MNIST is too easy to separate the configurations. Details: [`docs/results/extended/verdicts.md`](docs/results/extended/verdicts.md).
 * **Packed NVFP4 weights are 7x smaller** (4.5 bits per weight) with 97.42% vs 97.54% MNIST
   accuracy. Our FP32 GEMV reaches 84% of the GPU's peak bandwidth; the NVFP4 GEMV kernel was
   reworked after its first GPU run and is being re-measured.
@@ -66,7 +69,7 @@ python/needle/fp4/      reference.py (NumPy reference), quantize.py (NDArray fak
 python/needle/ops/ops_fp4.py   FP4Matmul Op: each training matmul can run in FP4
 python/needle/nn/nn_fp4.py     nn.QuantizedLinear, a drop-in for nn.Linear
 src/                    CPU and CUDA backends; nvfp4.h holds the NVFP4 arithmetic both share
-apps/                   fp4_experiment.py (MNIST / CIFAR-10 training grid), plot_fp4.py,
+apps/                   fp4_experiment.py (MNIST / CIFAR-10 training grid), plot_fp4.py, fp4_stats.py,
                         fp4_grad_error.py (gradient error and bias of each FP4 matmul),
                         fp4_inference.py (MNIST from packed weights), fp4_mxfp4.py (stretch)
 benchmarks/bench_gemv.py  FP32 vs NVFP4 GEMV kernels
@@ -92,6 +95,8 @@ python3 apps/fp4_experiment.py --dataset cifar10 --configs all --epochs 3 --seed
 python3 apps/fp4_experiment.py --dataset cifar10 --configs weights --epochs 3 --seed 0 --out results/cifar_w_seed0.csv
 python3 apps/plot_fp4.py results/cifar_seed*.csv --out-dir results/cifar --title "CIFAR-10 MLP" --prefix cifar
 python3 apps/fp4_grad_error.py --dataset cifar10 --checkpoints 0 391 1173 --out results/grad_error_cifar.csv
+bash scripts/run_extended.sh          # the pre-registered 20-epoch study (about 6 h on 4 CPU cores, resumable)
+python3 apps/fp4_stats.py docs/results/extended --out docs/results/extended/verdicts.md
 python3 benchmarks/bench_gemv.py --device cuda --sizes 1024 2048 4096 8192
 python3 apps/fp4_inference.py --device cuda
 ```

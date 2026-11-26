@@ -19,7 +19,33 @@ sum of powers of two using comparisons (see `round_to_e4m3`).
 
 from typing import Optional
 
+import numpy as np
+
 from .reference import E4M3_MAX, FP4_MAX, NVFP4_BLOCK_SIZE
+
+# Stochastic rounding draws its uniforms from its own generator, so SR never
+# shares a random stream with data shuffling or weight initialization.
+_sr_rng = np.random.default_rng(0)
+
+
+def seed_sr(seed: int):
+    """Restart the stochastic-rounding random stream (the experiment runner calls this per run)."""
+    global _sr_rng
+    _sr_rng = np.random.default_rng(seed)
+
+
+def sr_state():
+    """State of the stochastic-rounding stream (for exact resume from a checkpoint)."""
+    return _sr_rng.bit_generator.state
+
+
+def set_sr_state(state):
+    _sr_rng.bit_generator.state = state
+
+
+def sr_uniforms(shape):
+    """Next uniforms in [0, 1) from the stochastic-rounding stream, as float32."""
+    return _sr_rng.random(shape, dtype=np.float32)
 
 # E2M1 rounding table for round-to-nearest-even. Each row is
 # (midpoint between two neighbouring grid values, size of the jump, tie rounds up?).
@@ -143,13 +169,13 @@ def fake_quant(x, axis: int, stochastic: bool = False, rand=None):
         axis: axis to block along.
         stochastic: stochastic rounding of the FP4 elements.
         rand: optional NDArray of uniforms with x's shape; if stochastic and not
-              given, drawn with x.device.rand (needle's usual random source).
+              given, drawn from the stochastic-rounding stream (see seed_sr).
     """
     bs = NVFP4_BLOCK_SIZE
     ndim = len(x.shape)
     axis = axis % ndim
     if stochastic and rand is None:
-        rand = x.device.rand(*x.shape)
+        rand = type(x)(sr_uniforms(tuple(x.shape)), device=x.device)
     if stochastic:
         assert tuple(rand.shape) == tuple(x.shape), f"rand has shape {rand.shape}, expected {x.shape}"
 
