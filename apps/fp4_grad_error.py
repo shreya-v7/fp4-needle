@@ -1,8 +1,8 @@
 # AI-assisted: written with Claude (Anthropic) via Claude Code; reviewed and tested by the team.
 """Experiment: how much error does each FP4 matmul put into the gradients?
 
-Training curves on MNIST are noisy and saturate quickly, so this measures the
-effect of FP4 directly. For one fixed batch and one set of weights:
+Training curves are noisy, so this measures the effect of FP4 on the gradients
+directly. For one fixed batch and one set of weights:
 
   1. compute exact FP32 weight gradients of every layer (the reference),
   2. compute them again with each QuantConfig (same weights, same batch),
@@ -18,6 +18,7 @@ It does this at several points of FP32 training (--checkpoints), because
 gradients shrink as training progresses, which is when FP4 underflow bites.
 
     python3 apps/fp4_grad_error.py --device cpu --checkpoints 0 469 1407
+    python3 apps/fp4_grad_error.py --dataset cifar10 --checkpoints 0 391 1173
 
 NumPy is used only for the metrics, like the other apps.
 """
@@ -33,7 +34,7 @@ import numpy as np
 
 import needle as ndl
 from needle.fp4.config import QuantConfig
-from fp4_experiment import load_mnist, make_mlp, to_device
+from fp4_experiment import DATASETS, make_mlp, to_device
 
 CONFIGS = [
     QuantConfig(fprop=True),
@@ -66,6 +67,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--device", choices=["cpu", "cuda", "cpu_numpy"], default="cpu")
     parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--dataset", choices=DATASETS, default="mnist")
     parser.add_argument("--out", default="results/grad_error.csv")
     parser.add_argument("--checkpoints", type=int, nargs="+", default=[0, 469, 1407],
                         help="FP32 training steps after which gradients are measured")
@@ -80,9 +82,10 @@ def main():
     if not device.enabled():
         parser.error(f"needle's {args.device} backend is not built. On Colab: Runtime > "
                      "Change runtime type > GPU, then rebuild with `make`.")
-    train_set, test_set = load_mnist(args.data_dir, 0)
+    load, in_features = DATASETS[args.dataset]
+    train_set, test_set = load(args.data_dir, 0)
     np.random.seed(args.seed)
-    model = make_mlp(QuantConfig(), args.hidden, device)          # FP32 model we train
+    model = make_mlp(QuantConfig(), args.hidden, device, in_features)   # FP32 model we train
     optimizer = ndl.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
     # One fixed evaluation batch from the test set, used at every checkpoint.
     X_eval, y_eval = to_device(next(iter(ndl.data.DataLoader(test_set, args.batch_size))), device)
@@ -110,7 +113,7 @@ def main():
               f"{'rel.err of mean of K':>21s}")
 
         for config in CONFIGS:
-            qmodel = make_mlp(config, args.hidden, device)
+            qmodel = make_mlp(config, args.hidden, device, in_features)
             copy_weights(model, qmodel)
             grads = weight_grads(qmodel, X_eval, y_eval)
             # For SR, average K independent draws to expose (lack of) bias.

@@ -6,6 +6,7 @@
 Writes, averaging over every seed found in the CSVs:
     mnist_grid.png       train loss and test accuracy for the project grid
     mnist_ablation.png   the same for single-matmul ablations (vs FP32)
+    mnist_weights.png    consistent weight quantization (only if those configs were run)
     summary.md           a table of final numbers per config (the chart's table view)
 """
 import argparse
@@ -31,12 +32,19 @@ FAMILY_COLORS = {
 }
 GRID = ["fp32", "fprop", "fprop+dgrad", "fprop+dgrad+sr", "fprop+dgrad+wgrad", "fprop+dgrad+wgrad+sr"]
 ABLATION = ["fp32", "dgrad", "dgrad+sr", "wgrad", "wgrad+sr"]
+# How W is quantized for Fprop and Dgrad (QuantConfig.weights), with all three matmuls in FP4.
+WEIGHTS = ["fp32", "fprop+dgrad+wgrad", "fprop+dgrad+wgrad+w2d", "fprop+dgrad+wgrad+wsr",
+           "fprop+dgrad+wgrad+sr", "fprop+dgrad+wgrad+sr+w2d", "fprop+dgrad+wgrad+sr+wsr"]
+WEIGHT_COLORS = {"+w2d": "#1baf7a", "+wsr": "#6250d6"}   # aqua: 16x16 tiles, violet: SR re-quantized
 
 
 def style(config):
-    family = config[:-3] if config.endswith("+sr") else config
-    color = FAMILY_COLORS.get(family, "#7f7f7f")   # gray for configs we have no color for
-    return dict(color=color, linestyle="--" if config.endswith("+sr") else "-", linewidth=2)
+    weights = next((w for w in WEIGHT_COLORS if config.endswith(w)), "")
+    base = config[: len(config) - len(weights)]
+    sr = base.endswith("+sr")
+    family = base[:-3] if sr else base
+    color = WEIGHT_COLORS.get(weights) or FAMILY_COLORS.get(family, "#7f7f7f")
+    return dict(color=color, linestyle="--" if sr else "-", linewidth=2)
 
 
 def load(paths):
@@ -73,9 +81,8 @@ def smooth(values, alpha=0.02):
     return np.array(out)
 
 
-def plot(rows, configs, title, path, perplexity=False):
-    """Training loss, loss relative to FP32, and per-epoch test accuracy (or, with
-    perplexity=True for language models, test perplexity = exp(test loss))."""
+def plot(rows, configs, title, path):
+    """Training loss, loss relative to FP32, and per-epoch test accuracy."""
     configs = [c for c in configs if c in rows]
     if not configs:
         print(f"no runs to plot for {path}; skipped")
@@ -107,37 +114,27 @@ def plot(rows, configs, title, path, perplexity=False):
 
         # Test metric per epoch: mean over seeds, bars show min..max.
         epochs = sorted({e for s in seeds for e, _, _ in s["test"]})
-        if perplexity:
-            vals = [[np.exp(l) for s in seeds for e2, l, _ in s["test"] if e2 == e] for e in epochs]
-        else:
-            vals = [[a * 100 for s in seeds for e2, _, a in s["test"] if e2 == e] for e in epochs]
+        vals = [[a * 100 for s in seeds for e2, _, a in s["test"] if e2 == e] for e in epochs]
         mean = np.array([np.mean(v) for v in vals])
         lo = mean - np.array([np.min(v) for v in vals])
         hi = np.array([np.max(v) for v in vals]) - mean
         ax_acc.errorbar(epochs, mean, yerr=[lo, hi], marker="o", markersize=8, capsize=3,
                         label=c, **style(c))
 
-    if perplexity:   # language-model losses sit in a narrow range (about 4 to 9)
-        ax_loss.set(xlabel="training step", ylabel="train loss (smoothed)", title="Training loss")
-    else:
-        ax_loss.set(xlabel="training step", ylabel="train loss (smoothed)", yscale="log",
-                    title="Training loss")
-        ax_loss.yaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
-        ax_loss.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
-        ax_loss.set_yticks([0.1, 0.2, 0.3, 0.5, 1.0, 2.0])
+    ax_loss.set(xlabel="training step", ylabel="train loss (smoothed)", yscale="log",
+                title="Training loss")
+    ax_loss.yaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
+    ax_loss.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    ax_loss.set_yticks([0.1, 0.2, 0.3, 0.5, 1.0, 2.0])
     ax_gap.set(xlabel="training step", ylabel="train loss vs FP32 (%)",
                title="Training loss relative to FP32")
-    if perplexity:
-        ax_acc.set(xlabel="epoch", ylabel="test perplexity (lower is better)",
-                   title="Test perplexity (mean, min-max over seeds)")
-    else:
-        ax_acc.set(xlabel="epoch", ylabel="test accuracy (%)",
-                   title="Test accuracy (mean, min-max over seeds)")
+    ax_acc.set(xlabel="epoch", ylabel="test accuracy (%)",
+               title="Test accuracy (mean, min-max over seeds)")
     ax_acc.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
     for ax in (ax_loss, ax_gap, ax_acc):
         ax.grid(True, color="#e5e5e5", linewidth=0.8)
         ax.spines[["top", "right"]].set_visible(False)
-    ax_acc.legend(fontsize=8, frameon=False, loc="upper right" if perplexity else "lower right")
+    ax_acc.legend(fontsize=8, frameon=False, loc="lower right")
     num_seeds = max(len(rows[c]) for c in configs)
     fig.suptitle(f"{title}  ({num_seeds} seed{'s' if num_seeds > 1 else ''})")
     fig.tight_layout()
@@ -146,12 +143,12 @@ def plot(rows, configs, title, path, perplexity=False):
     print("wrote", path)
 
 
-def summary(rows, path, perplexity=False):
-    ppl_head, ppl_sep = (" final test ppl |", "---|") if perplexity else ("", "")
-    lines = [f"| config | seeds | final test acc (%) | final test loss |{ppl_head} "
+def summary(rows, path):
+    lines = ["| config | seeds | final test acc (%) | final test loss | "
              "train loss, last 100 steps | s per run |",
-             f"|---|---|---|---|{ppl_sep}---|---|"]
-    for c in [c for c in GRID + ABLATION[1:] if c in rows]:
+             "|---|---|---|---|---|---|"]
+    known = GRID + ABLATION[1:] + WEIGHTS[1:]
+    for c in [c for c in dict.fromkeys(known) if c in rows] + sorted(c for c in rows if c not in known):
         seeds = list(rows[c].values())
         acc = [s["test"][-1][2] * 100 for s in seeds if s["test"]]
         tl = [s["test"][-1][1] for s in seeds if s["test"]]
@@ -160,10 +157,8 @@ def summary(rows, path, perplexity=False):
         if len(acc) < len(seeds):  # a run stopped early because its loss became inf/nan
             lines.append(f"| {c} | {len(seeds)} | diverged in {len(seeds) - len(acc)} seed(s) | | | |")
             continue
-        ppl = np.exp(tl)
-        ppl_cell = f" {np.mean(ppl):.1f} ± {np.std(ppl):.1f} |" if perplexity else ""
         lines.append(f"| {c} | {len(seeds)} | {np.mean(acc):.2f} ± {np.std(acc):.2f} | "
-                     f"{np.mean(tl):.4f} |{ppl_cell} {np.mean(tr):.4f} | {np.mean(t):.0f} |")
+                     f"{np.mean(tl):.4f} | {np.mean(tr):.4f} | {np.mean(t):.0f} |")
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")
     print("\n".join(lines))
@@ -213,18 +208,19 @@ def main():
     parser.add_argument("--grad-error", help="CSV from apps/fp4_grad_error.py to plot as well")
     parser.add_argument("--title", default="MNIST MLP", help="model name used in plot titles")
     parser.add_argument("--prefix", default="mnist", help="file name prefix of the two plots")
-    parser.add_argument("--perplexity", action="store_true",
-                        help="language model: plot and tabulate test perplexity")
     args = parser.parse_args()
     rows = load(args.csvs)
     os.makedirs(args.out_dir, exist_ok=True)
     if args.grad_error:
         plot_grad_error(args.grad_error, os.path.join(args.out_dir, "grad_error.png"))
     plot(rows, GRID, f"{args.title}: FP4 matmuls added one at a time",
-         os.path.join(args.out_dir, f"{args.prefix}_grid.png"), args.perplexity)
+         os.path.join(args.out_dir, f"{args.prefix}_grid.png"))
     plot(rows, ABLATION, f"{args.title}: one backward matmul in FP4",
-         os.path.join(args.out_dir, f"{args.prefix}_ablation.png"), args.perplexity)
-    summary(rows, os.path.join(args.out_dir, "summary.md"), args.perplexity)
+         os.path.join(args.out_dir, f"{args.prefix}_ablation.png"))
+    if any(c.endswith(("+w2d", "+wsr")) for c in rows):
+        plot(rows, WEIGHTS, f"{args.title}: how W is quantized for Fprop and Dgrad",
+             os.path.join(args.out_dir, f"{args.prefix}_weights.png"))
+    summary(rows, os.path.join(args.out_dir, "summary.md"))
 
 
 if __name__ == "__main__":

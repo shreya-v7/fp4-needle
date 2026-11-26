@@ -106,6 +106,23 @@ def test_fake_quant_matches_reference(device, shape, axis, stochastic):
 
 
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("shape", [(16, 16), (5, 37), (64, 784), (33, 20), (1, 1)])
+def test_fake_quant_2d_matches_reference(device, shape):
+    rng = np.random.default_rng(4)
+    x = rng.standard_normal(shape).astype(np.float32)
+    x.flat[::7] *= 30.0
+    out = quantize.fake_quant_2d(_arr(x, device))
+    assert out.shape == x.shape
+    np.testing.assert_array_equal(out.numpy(), ref.fake_quant_2d(x))
+
+
+def test_fake_quant_2d_is_the_same_both_ways():
+    """One scale per 16 x 16 tile: quantizing W or W^T gives the same values."""
+    w = np.random.default_rng(5).standard_normal((40, 72)).astype(np.float32)
+    np.testing.assert_array_equal(ref.fake_quant_2d(w.T), ref.fake_quant_2d(w).T)
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_fake_quant_edge_cases(device):
     zeros = np.zeros((4, 20), dtype=np.float32)
     np.testing.assert_array_equal(quantize.fake_quant(_arr(zeros, device), axis=1).numpy(), zeros)
@@ -140,15 +157,23 @@ def _expected(config, X, W, G, device, seed=0):
     multiplied with needle's own matmul (so float32 summation order is identical)."""
     fq = ref.fake_quant
     mm = lambda a, b: (_arr(a, device) @ _arr(b, device)).numpy()
+    W_fwd = ref.fake_quant_2d(W) if config.weights == "2d" else fq(W, 0)
 
-    Y = mm(fq(X, 1), fq(W, 0)) if config.fprop else mm(X, W)
+    Y = mm(fq(X, 1), W_fwd) if config.fprop else mm(X, W)
 
     # Replay the random draws in the Op's order: Dgrad's dY first, then Wgrad's.
     np.random.seed(seed)
     draw = lambda shape: np.random.rand(*shape).astype(np.float32)
     if config.dgrad:
         rand = draw(G.shape) if config.stochastic else None
-        dX = mm(fq(G, 1, config.stochastic, rand), fq(W, 1).T)
+        dY_q = fq(G, 1, config.stochastic, rand)
+        if config.weights == "2d":
+            W_q = ref.fake_quant_2d(W)
+        elif config.weights == "sr":
+            W_q = fq(W_fwd if config.fprop else W, 1, True, draw(W.shape))
+        else:
+            W_q = fq(W, 1)
+        dX = mm(dY_q, W_q.T)
     else:
         dX = mm(G, W.T)
     if config.wgrad:
@@ -162,7 +187,11 @@ def _expected(config, X, W, G, device, seed=0):
 ALL_CONFIGS = [FP32, FPROP, FPROP_DGRAD, FPROP_DGRAD_WGRAD,
                QuantConfig(fprop=True, dgrad=True, stochastic=True),
                QuantConfig(fprop=True, dgrad=True, wgrad=True, stochastic=True),
-               QuantConfig(wgrad=True), QuantConfig(dgrad=True, stochastic=True)]
+               QuantConfig(wgrad=True), QuantConfig(dgrad=True, stochastic=True),
+               QuantConfig(fprop=True, dgrad=True, weights="2d"),
+               QuantConfig(fprop=True, dgrad=True, wgrad=True, stochastic=True, weights="2d"),
+               QuantConfig(fprop=True, dgrad=True, weights="sr"),
+               QuantConfig(dgrad=True, wgrad=True, stochastic=True, weights="sr")]
 
 
 @pytest.mark.parametrize("device", DEVICES)

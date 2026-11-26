@@ -695,46 +695,78 @@ void Nvfp4Dequantize(const CudaByteArray& packed, const CudaByteArray& scales, f
 
 // ---- (b) dequantize + GEMV --------------------------------------------------
 
+// Rows per warp in the NVFP4 GEMV: the 16 x values of a block are loaded once and used for
+// all of them, which cuts reads of x by this factor.
+const int NVFP4_ROWS_PER_WARP = 4;
+
 __global__ void Nvfp4GemvKernel(const uint8_t* packed, const uint8_t* scales, float ts,
                                 const scalar_t* x, scalar_t* y, size_t rows, size_t cols,
-                                size_t cols_pad) {
+                                size_t cols_pad, bool x_vec4) {
   /**
-   * y = W x, one warp per output row. Lane l reads blocks l, l+32, ...: each
-   * block is 8 bytes of codes (one 64-bit load; neighbouring lanes read
-   * neighbouring 8-byte chunks, so a warp reads 256 contiguous bytes at once)
-   * plus one scale byte. Codes are turned into values with a 16-entry table in
-   * shared memory, products are accumulated in FP32, and the 32 lane sums are
-   * combined with a __shfl_xor_sync butterfly. Same order as the CPU version.
+   * y = W x. Each warp computes NVFP4_ROWS_PER_WARP output rows. Lane l reads blocks
+   * l, l+32, ... of each row: a block is 8 bytes of codes (one 64-bit load;
+   * neighbouring lanes read neighbouring 8-byte chunks, so a warp reads 256
+   * contiguous bytes at once) plus one scale byte. Codes and scale bytes become
+   * values through tables in shared memory (16 E2M1 values, 256 E4M3 values),
+   * products are accumulated in FP32, and each row's 32 lane sums are combined
+   * with a __shfl_xor_sync butterfly. Every row adds in the same order as the
+   * CPU version, so the result is bit-identical.
+   *
+   * Speed: a block's 16 x values are loaded once per warp and reused for all its
+   * rows (as four float4 loads when x_vec4: no padding, x 16-byte aligned), and
+   * the rows' sums are independent, so they run in parallel.
    */
   using namespace nvfp4;
-  __shared__ float table[16];
-  if (threadIdx.x < 16) table[threadIdx.x] = e2m1_value(threadIdx.x);
+  const int R = NVFP4_ROWS_PER_WARP;
+  __shared__ float e2m1[16];
+  __shared__ float e4m3[256];
+  for (int i = threadIdx.x; i < 256; i += blockDim.x) e4m3[i] = decode_e4m3(i);
+  if (threadIdx.x < 16) e2m1[threadIdx.x] = e2m1_value(threadIdx.x);
   __syncthreads();
 
-  size_t row = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+  size_t row0 = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE * R;
   int lane = threadIdx.x % WARP_SIZE;
-  if (row >= rows) return;                      // whole warps exit together
+  if (row0 >= rows) return;                     // whole warps exit together
+  int nrows = rows - row0 < (size_t)R ? (int)(rows - row0) : R;   // same for the whole warp
 
   size_t num_blocks = cols_pad / BLOCK;
-  const uint8_t* row_codes = packed + row * (cols_pad / 2);
-  float acc = 0.0f;
+  float acc[R] = {0.0f, 0.0f, 0.0f, 0.0f};
   for (size_t b = lane; b < num_blocks; b += WARP_SIZE) {
-    uint2 bytes8 = *reinterpret_cast<const uint2*>(row_codes + b * 8);  // 16 codes
-    float scale = mul_rn(decode_e4m3(scales[row * num_blocks + b]), ts);
-    float s = 0.0f;
-    for (int k = 0; k < 8; k++) {
-      uint32_t word = k < 4 ? bytes8.x : bytes8.y;
-      uint32_t byte = (word >> (8 * (k % 4))) & 0xFF;     // little-endian: byte k
-      size_t c = b * BLOCK + 2 * k;
-      float x0 = c < cols ? x[c] : 0.0f, x1 = c + 1 < cols ? x[c + 1] : 0.0f;
-      s = add_rn(s, mul_rn(table[byte & 0xF], x0));       // element 2k (low nibble)
-      s = add_rn(s, mul_rn(table[byte >> 4], x1));        // element 2k+1 (high nibble)
+    float xs[BLOCK];
+    if (x_vec4) {
+      const float4* x4 = reinterpret_cast<const float4*>(x + b * BLOCK);
+      for (int q = 0; q < 4; q++) {
+        float4 t = __ldg(x4 + q);
+        xs[4 * q] = t.x; xs[4 * q + 1] = t.y; xs[4 * q + 2] = t.z; xs[4 * q + 3] = t.w;
+      }
+    } else {
+      for (int j = 0; j < BLOCK; j++) xs[j] = b * BLOCK + j < cols ? x[b * BLOCK + j] : 0.0f;
     }
-    acc = add_rn(acc, mul_rn(s, scale));
+#pragma unroll
+    for (int r = 0; r < R; r++) {
+      if (r >= nrows) break;
+      size_t row = row0 + r;
+      uint2 bytes8 = __ldg(reinterpret_cast<const uint2*>(packed + row * (cols_pad / 2) + b * 8));
+      float scale = mul_rn(e4m3[__ldg(scales + row * num_blocks + b)], ts);
+      float s = 0.0f;
+#pragma unroll
+      for (int k = 0; k < 8; k++) {
+        uint32_t word = k < 4 ? bytes8.x : bytes8.y;
+        uint32_t byte = (word >> (8 * (k % 4))) & 0xFF;     // little-endian: byte k
+        s = add_rn(s, mul_rn(e2m1[byte & 0xF], xs[2 * k]));     // element 2k (low nibble)
+        s = add_rn(s, mul_rn(e2m1[byte >> 4], xs[2 * k + 1]));  // element 2k+1 (high nibble)
+      }
+      acc[r] = add_rn(acc[r], mul_rn(s, scale));
+    }
   }
-  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2)
-    acc = add_rn(acc, __shfl_xor_sync(FULL_MASK, acc, offset));
-  if (lane == 0) y[row] = acc;
+#pragma unroll
+  for (int r = 0; r < R; r++) {
+    if (r >= nrows) break;
+    float v = acc[r];
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2)
+      v = add_rn(v, __shfl_xor_sync(FULL_MASK, v, offset));
+    if (lane == 0) y[row0 + r] = v;
+  }
 }
 
 __global__ void GemvFp32Kernel(const scalar_t* w, const scalar_t* x, scalar_t* y, size_t rows,
@@ -760,15 +792,17 @@ __global__ void GemvFp32Kernel(const scalar_t* w, const scalar_t* x, scalar_t* y
   if (lane == 0) y[row] = acc;
 }
 
-// One warp per row: blocks of 256 threads cover 8 rows.
-static dim3 GemvGrid(size_t rows) {
-  return dim3((rows * WARP_SIZE + BASE_THREAD_NUM - 1) / BASE_THREAD_NUM);
+// Grid for `warps` warps (one per row, or per group of rows): blocks of 256 threads hold 8 warps.
+static dim3 GemvGrid(size_t warps) {
+  return dim3((warps * WARP_SIZE + BASE_THREAD_NUM - 1) / BASE_THREAD_NUM);
 }
 
 void Nvfp4Gemv(const CudaByteArray& packed, const CudaByteArray& scales, float ts,
                const CudaArray& x, CudaArray* y, size_t rows, size_t cols) {
-  Nvfp4GemvKernel<<<GemvGrid(rows), BASE_THREAD_NUM>>>(packed.ptr, scales.ptr, ts, x.ptr, y->ptr,
-                                                       rows, cols, nvfp4::padded_cols(cols));
+  bool x_vec4 = cols % nvfp4::BLOCK == 0 && reinterpret_cast<uintptr_t>(x.ptr) % 16 == 0;
+  size_t warps = (rows + NVFP4_ROWS_PER_WARP - 1) / NVFP4_ROWS_PER_WARP;
+  Nvfp4GemvKernel<<<GemvGrid(warps), BASE_THREAD_NUM>>>(packed.ptr, scales.ptr, ts, x.ptr, y->ptr,
+                                                       rows, cols, nvfp4::padded_cols(cols), x_vec4);
   CUDA_CHECK_LAUNCH();
 }
 

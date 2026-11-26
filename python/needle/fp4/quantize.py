@@ -106,6 +106,31 @@ def round_to_e2m1(v, rand=None):
     return q * sign
 
 
+def _fake_quant_blocks(x, blocks, rand_blocks=None):
+    """Steps 2 to 5 of fake_quant on blocks laid out along the last axis of `blocks`."""
+    block_axis = len(blocks.shape) - 1
+
+    # 2. Per-tensor FP32 scale = amax / (6 * 448), or 1 if the tensor is all zero.
+    #    Kept as a 1-element NDArray (on the device) and broadcast where needed.
+    tensor_amax = x.abs().max()                                   # shape (1,)
+    tensor_scale = tensor_amax / float(FP4_MAX * E4M3_MAX) + (tensor_amax == 0.0)
+
+    # 3. Per-block scale = round_to_e4m3((amax(block) / 6) / tensor_scale).
+    block_amax = blocks.abs().max(axis=block_axis, keepdims=True)  # (..., nb, 1)
+    tensor_scale = tensor_scale.reshape((1,) * len(block_amax.shape)).broadcast_to(block_amax.shape)
+    block_scale = round_to_e4m3((block_amax / float(FP4_MAX)) / tensor_scale)
+
+    # 4. Divide by the total scale. Blocks whose scale is 0 (all zero, or too
+    #    small for E4M3) become zero: divide by 1 there, then multiply by 0.
+    scale = block_scale * tensor_scale
+    has_scale = (scale > 0.0).broadcast_to(blocks.shape)
+    safe_scale = (scale + (scale == 0.0)).broadcast_to(blocks.shape)
+    scaled = blocks / safe_scale * has_scale
+
+    # 5. Round each element to E2M1 and multiply the scale back in.
+    return round_to_e2m1(scaled, rand_blocks) * scale.broadcast_to(blocks.shape)
+
+
 def fake_quant(x, axis: int, stochastic: bool = False, rand=None):
     """Quantize an NDArray to NVFP4 along `axis` and dequantize it again.
 
@@ -142,31 +167,32 @@ def fake_quant(x, axis: int, stochastic: bool = False, rand=None):
         return t.reshape(t.shape[:-1] + ((n + pad) // bs, bs))
 
     blocks = to_blocks(x)
-    block_axis = len(blocks.shape) - 1
-
-    # 2. Per-tensor FP32 scale = amax / (6 * 448), or 1 if the tensor is all zero.
-    #    Kept as a 1-element NDArray (on the device) and broadcast where needed.
-    tensor_amax = x.abs().max()                                   # shape (1,)
-    tensor_scale = tensor_amax / float(FP4_MAX * E4M3_MAX) + (tensor_amax == 0.0)
-
-    # 3. Per-block scale = round_to_e4m3((amax(block) / 6) / tensor_scale).
-    block_amax = blocks.abs().max(axis=block_axis, keepdims=True)  # (..., nb, 1)
-    tensor_scale = tensor_scale.reshape((1,) * len(block_amax.shape)).broadcast_to(block_amax.shape)
-    block_scale = round_to_e4m3((block_amax / float(FP4_MAX)) / tensor_scale)
-
-    # 4. Divide by the total scale. Blocks whose scale is 0 (all zero, or too
-    #    small for E4M3) become zero: divide by 1 there, then multiply by 0.
-    scale = block_scale * tensor_scale
-    has_scale = (scale > 0.0).broadcast_to(blocks.shape)
-    safe_scale = (scale + (scale == 0.0)).broadcast_to(blocks.shape)
-    scaled = blocks / safe_scale * has_scale
-
-    # 5. Round each element to E2M1 and multiply the scale back in.
     rand_blocks = to_blocks(rand) if stochastic else None
-    dequantized = round_to_e2m1(scaled, rand_blocks) * scale.broadcast_to(blocks.shape)
+    dequantized = _fake_quant_blocks(x, blocks, rand_blocks)
 
     # 6. Undo step 1: merge blocks, drop the padding, restore the axis order.
     out = dequantized.reshape(dequantized.shape[:-2] + (n + pad,))
     if pad:
         out = out[tuple(slice(None) for _ in range(ndim - 1)) + (slice(0, n),)]
     return out.compact().permute(inverse_perm).compact()
+
+
+def fake_quant_2d(x):
+    """NVFP4 fake quantization of a 2-D NDArray with one scale per 16 x 16 tile.
+
+    Matches reference.fake_quant_2d bit for bit. Each scale covers a square tile,
+    so the forward (rows) and backward (columns) matmuls see the same weight.
+    """
+    bs = NVFP4_BLOCK_SIZE
+    rows, cols = x.shape
+    pad_r, pad_c = (-rows) % bs, (-cols) % bs
+    t = x.compact()
+    if pad_r or pad_c:
+        t = t.pad(((0, pad_r), (0, pad_c)))
+    R, C = (rows + pad_r) // bs, (cols + pad_c) // bs
+    tiles = t.reshape((R, bs, C, bs)).permute((0, 2, 1, 3)).compact().reshape((R, C, bs * bs))
+    q = _fake_quant_blocks(x, tiles)
+    out = q.reshape((R, C, bs, bs)).permute((0, 2, 1, 3)).compact().reshape((R * bs, C * bs))
+    if pad_r or pad_c:
+        out = out[0:rows, 0:cols]
+    return out.compact()
