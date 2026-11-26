@@ -160,28 +160,46 @@ def evaluate(model, dataset, device, batch_size=1000):
 # ----------------------------------------------------------------------------
 
 def epoch_checkpoint(args, name):
-    """Path of a run's end-of-epoch training state, or None when checkpoints are off."""
-    return os.path.join(args.checkpoint_dir, f"{name}_s{args.seed}.npz") if args.checkpoint_dir else None
+    """Path of a run's end-of-epoch training state, or None when checkpoints are off.
+    Named after the output file too, so jobs sharing a folder never read each other's state."""
+    if not args.checkpoint_dir:
+        return None
+    job = os.path.splitext(os.path.basename(args.out))[0]
+    return os.path.join(args.checkpoint_dir, f"{job}__{name}_s{args.seed}.npz")
+
+
+def run_identity(args, name):
+    """Everything that defines a run; a checkpoint only resumes the run it was saved by."""
+    return json.dumps({"config": name, "seed": args.seed, "out": os.path.abspath(args.out),
+                       "dataset": args.dataset, "train_subset": args.train_subset, "lr": args.lr,
+                       "hidden": args.hidden, "depth": args.depth, "batch_size": args.batch_size,
+                       "epochs": args.epochs}, sort_keys=True)
 
 
 def checkpointed_epochs(args, name):
+    """Epochs saved in this run's own checkpoint (0 if there is none)."""
     path = epoch_checkpoint(args, name)
-    return int(np.load(path)["epoch"]) if path and os.path.exists(path) else 0
+    if not (path and os.path.exists(path)):
+        return 0
+    data = np.load(path)
+    return int(data["epoch"]) if str(data["identity"]) == run_identity(args, name) else 0
 
 
-def save_state(path, epoch, step, model, optimizer, elapsed):
+def save_state(path, identity, epoch, step, model, optimizer, elapsed):
     """Everything needed to continue exactly: weights, SGD momentum, SR random state, counters.
     (The data order needs nothing: it is re-seeded at the start of every epoch.)"""
     params = model.parameters()
     arrays = {f"p{i}": p.numpy() for i, p in enumerate(params)}
     arrays.update({f"u{i}": optimizer.u[p].numpy() for i, p in enumerate(params) if p in optimizer.u})
     tmp = path + ".tmp.npz"
-    np.savez(tmp, epoch=epoch, step=step, elapsed=elapsed, sr=json.dumps(sr_state()), **arrays)
+    np.savez(tmp, identity=identity, epoch=epoch, step=step, elapsed=elapsed, sr=json.dumps(sr_state()), **arrays)
     os.replace(tmp, path)   # atomic: an interruption never leaves a half-written checkpoint
 
 
-def load_state(path, model, optimizer, device):
+def load_state(path, identity, model, optimizer, device):
     data = np.load(path)
+    if str(data["identity"]) != identity:
+        raise RuntimeError(f"{path} was saved by a different run; refusing to resume from it")
     for i, p in enumerate(model.parameters()):
         p.data = ndl.Tensor(data[f"p{i}"], device=device)
         if f"u{i}" in data:
@@ -205,7 +223,7 @@ def train_one(config, args, train_set, test_set, device, writer, out_file=None):
     first_epoch, step = 1, 0
     ckpt = epoch_checkpoint(args, name)
     if ckpt and os.path.exists(ckpt):
-        done, step, elapsed = load_state(ckpt, model, optimizer, device)
+        done, step, elapsed = load_state(ckpt, run_identity(args, name), model, optimizer, device)
         first_epoch, start = done + 1, start - elapsed
         print(f"  {name}: continuing from the checkpoint after epoch {done}", flush=True)
 
@@ -239,7 +257,7 @@ def train_one(config, args, train_set, test_set, device, writer, out_file=None):
         if ckpt:
             out_file.flush()                 # this epoch's rows reach the disk before its checkpoint,
             os.fsync(out_file.fileno())      # so the CSV is never behind the checkpoint
-            save_state(ckpt, epoch, step, model, optimizer, time.time() - start)
+            save_state(ckpt, run_identity(args, name), epoch, step, model, optimizer, time.time() - start)
     if ckpt and os.path.exists(ckpt):
         os.remove(ckpt)   # the run is complete; its rows are in the CSV
     if args.save_weights:
