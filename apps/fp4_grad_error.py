@@ -11,8 +11,12 @@ directly. For one fixed batch and one set of weights:
      exactly zero (FP4 underflow).
 
 For stochastic-rounding configs it also averages the gradient over K random
-draws. If SR is unbiased, the error of that average shrinks like 1/sqrt(K);
-round-to-nearest is deterministic, so averaging cannot remove its error (bias).
+draws and splits the error into
+    noise = RMS over draws of ||draw - mean|| / ||g_fp32||   (what SGD averages away)
+    bias  = ||E[draw] - g_fp32|| / ||g_fp32||               (what averaging cannot remove)
+The mean of K draws still carries noise / sqrt(K) of leftover noise, so bias is
+estimated as sqrt(||mean - g_fp32||^2 - noise^2 / (K - 1)) / ||g_fp32||.
+Round-to-nearest is deterministic: all its error is bias and its noise is 0.
 
 It does this at several points of FP32 training (--checkpoints), because
 gradients shrink as training progresses, which is when FP4 underflow bites.
@@ -40,6 +44,9 @@ CONFIGS = [
     QuantConfig(fprop=True),
     QuantConfig(dgrad=True),
     QuantConfig(dgrad=True, stochastic=True),
+    QuantConfig(dgrad=True, dgrad_operands="dy"),
+    QuantConfig(dgrad=True, dgrad_operands="dy", stochastic=True),
+    QuantConfig(dgrad=True, dgrad_operands="w"),
     QuantConfig(wgrad=True),
     QuantConfig(wgrad=True, stochastic=True),
     QuantConfig(fprop=True, dgrad=True, wgrad=True),
@@ -110,31 +117,32 @@ def main():
         print(f"\nstep {step}: FP32 |dW| per layer = "
               + ", ".join(f"{np.linalg.norm(g):.3g}" for g in reference))
         print(f"{'config':24s} {'layer':7s} {'rel.err':>8s} {'cosine':>7s} {'zeros%':>7s} "
-              f"{'rel.err of mean of K':>21s}")
+              f"{'bias':>7s} {'noise':>7s}")
 
         for config in CONFIGS:
             qmodel = make_mlp(config, args.hidden, device, in_features)
             copy_weights(model, qmodel)
             grads = weight_grads(qmodel, X_eval, y_eval)
             # For SR, average K independent draws to expose (lack of) bias.
+            draws = [grads]
             if config.stochastic:
-                mean = [g.copy() for g in grads]
-                for _ in range(args.sr_draws - 1):
-                    for m, g in zip(mean, weight_grads(qmodel, X_eval, y_eval)):
-                        m += g
-                mean = [m / args.sr_draws for m in mean]
+                draws += [weight_grads(qmodel, X_eval, y_eval) for _ in range(args.sr_draws - 1)]
+            mean = [np.mean([d[i] for d in draws], axis=0) for i in range(len(grads))]
             for name, g, g_ref, i in zip(LAYERS, grads, reference, range(3)):
                 ref_norm = np.linalg.norm(g_ref)
                 rel_err = np.linalg.norm(g - g_ref) / ref_norm
                 cosine = float(np.sum(g * g_ref) / (np.linalg.norm(g) * ref_norm + 1e-30))
                 zeros = float(np.mean((g == 0) & (g_ref != 0))) * 100
-                mean_err = (np.linalg.norm(mean[i] - g_ref) / ref_norm) if config.stochastic else rel_err
+                mean_err = np.linalg.norm(mean[i] - g_ref) / ref_norm
+                noise = np.sqrt(np.mean([np.sum((d[i] - mean[i]) ** 2) for d in draws])) / ref_norm
+                k = len(draws)
+                bias = np.sqrt(max(mean_err ** 2 - noise ** 2 / (k - 1), 0.0)) if k > 1 else mean_err
                 rows.append({"step": step, "config": config.name, "layer": name,
                              "rel_error": f"{rel_err:.5f}", "cosine": f"{cosine:.5f}",
                              "zero_pct": f"{zeros:.2f}", "rel_error_of_mean": f"{mean_err:.5f}",
-                             "sr_draws": args.sr_draws if config.stochastic else 1})
+                             "bias": f"{bias:.5f}", "noise": f"{noise:.5f}", "sr_draws": k})
                 print(f"{config.name:24s} {name:7s} {rel_err:8.4f} {cosine:7.4f} {zeros:7.2f} "
-                      f"{mean_err:21.4f}")
+                      f"{bias:7.4f} {noise:7.4f}")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", newline="") as f:
