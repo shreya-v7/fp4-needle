@@ -14,7 +14,7 @@ project code; NumPy is used only for the reference quantizer, data loading and t
    storage save?
 3. **Stretch:** how does MXFP4 compare with NVFP4?
 
-## Answers so far
+## Historical results from earlier runs
 
 * **Round-to-nearest gradients are what break 4-bit training.** CIFAR-10 MLP, 20 epochs, 5 seeds
   (pre-registered in [`docs/PREREGISTRATION.md`](docs/PREREGISTRATION.md), bias audit in
@@ -80,11 +80,11 @@ tests/fp4/              our tests (NumPy and pytest only)
 
 ## Running
 
-**Colab, one shot.** Open `notebooks/fp4_experiments.ipynb` from GitHub in Colab (File > Open
-notebook > GitHub) and Run all. It works with or without a GPU (a GPU adds the CUDA kernel tests
-and the GPU benchmark). It builds needle, runs the tests, re-runs the key CIFAR-10 result, the GEMV
-benchmark, packed inference and the MXFP4 comparison, prints a one-line verdict after each, and
-zips the output. If the repo is private, add a `GITHUB_TOKEN` secret (the setup cell explains how).
+**Colab report.** Open [the report notebook](notebooks/fp4_experiments.ipynb) in a fresh runtime.
+Run all for the paired demo, FP4 tests, packed inference, GEMV timings and format comparison.
+Set `FULL_STUDY = True` before starting to include the registered five-seed study and sensitivity
+runs. Private access requires a read-only `GITHUB_TOKEN` Colab secret. Download the run-specific
+evidence ZIP before disconnecting. Archived measurements above come from earlier executions.
 
 **Terminal**, from the repo root (`--device cpu` works for every training command):
 
