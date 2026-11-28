@@ -83,7 +83,7 @@ tests/fp4/              our tests (NumPy and pytest only)
 **Colab report.** Open [the report notebook](notebooks/fp4_experiments.ipynb) in a fresh runtime.
 Run all for the paired demo, FP4 tests, packed inference, GEMV timings and format comparison.
 Set `FULL_STUDY = True` before starting to include the registered five-seed study and sensitivity
-runs. Private access requires a read-only `GITHUB_TOKEN` Colab secret. Download the run-specific
+runs. Download the run-specific
 evidence ZIP before disconnecting. Archived measurements above come from earlier executions.
 
 **Terminal**, from the repo root (`--device cpu` works for every training command):
